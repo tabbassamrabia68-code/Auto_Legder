@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoLedger | Vehicle History & Verification</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark">AL</div>
+    <div>
+      <h1>AutoLedger</h1>
+      <p>Vehicle History &amp; Verification System</p>
+    </div>
+    <span id="api-status" class="status">Connecting…</span>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">LOCAL DEVELOPMENT MVP</p>
+      <h2>Know the history behind every vehicle.</h2>
+      <p>Search the AutoLedger PostgreSQL database by registration number, VIN, brand, or model.</p>
+      <form id="search-form">
+        <input id="search-input" placeholder="Try KHI-401 or Toyota" aria-label="Search vehicles">
+        <button type="submit">Search vehicles</button>
+        <button type="button" id="show-all" class="secondary">Show all</button>
+      </form>
+      <p id="message" role="status"></p>
+    </section>
+
+    <section class="results-section">
+      <div class="section-heading">
+        <div><p class="eyebrow">DATABASE RESULTS</p><h2>Vehicles</h2></div>
+        <span id="result-count">Loading…</span>
+      </div>
+      <div id="vehicle-grid" class="vehicle-grid"></div>
+    </section>
+
+    <section id="history-section" class="history-section hidden">
+      <div class="section-heading"><div><p class="eyebrow">RECORD DETAILS</p><h2 id="history-title">Vehicle history</h2></div>
+        <button id="close-history" class="secondary">Close</button>
+      </div>
+      <div id="history-content"></div>
+    </section>
+  </main>
+  <footer>AutoLedger • DBMS local MVP • Sample data only</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
