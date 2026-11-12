@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#19392f">
+  <meta name="theme-color" content="#101923">
   <title>AutoLedger | Fleet ledger</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
@@ -55,6 +55,14 @@
         <p class="nav-caption">WORKSPACE</p>
         <a href="#dashboard" class="nav-link active" data-page="dashboard"><svg><use href="#i-grid"></use></svg><span>Overview</span><kbd>1</kbd></a>
         <a href="#vehicles" class="nav-link" data-page="vehicles"><svg><use href="#i-car"></use></svg><span>Vehicles</span><kbd>2</kbd></a>
+        <a href="#inventory" class="nav-link commerce-nav" data-page="inventory"><svg><use href="#i-car"></use></svg><span>Inventory</span></a>
+        <p class="nav-caption nav-caption-spaced">BUSINESS</p>
+        <a href="#suppliers" class="nav-link commerce-nav" data-page="suppliers"><svg><use href="#i-users"></use></svg><span>Suppliers</span></a>
+        <a href="#customers" class="nav-link commerce-nav" data-page="customers"><svg><use href="#i-users"></use></svg><span>Customers</span></a>
+        <a href="#purchases" class="nav-link commerce-nav" data-page="purchases"><svg><use href="#i-file"></use></svg><span>Purchases</span></a>
+        <a href="#sales" class="nav-link commerce-nav" data-page="sales"><svg><use href="#i-chart"></use></svg><span>Sales</span></a>
+        <a href="#payments" class="nav-link commerce-nav" data-page="payments"><svg><use href="#i-check"></use></svg><span>Payments</span></a>
+        <p class="nav-caption nav-caption-spaced">VEHICLE HISTORY</p>
         <a href="#owners" class="nav-link" data-page="owners"><svg><use href="#i-users"></use></svg><span>Owners</span></a>
         <a href="#documents" class="nav-link" data-page="documents"><svg><use href="#i-file"></use></svg><span>Documents</span><b class="nav-alert" id="expiry-nav-count"></b></a>
         <a href="#inspections" class="nav-link" data-page="inspections"><svg><use href="#i-check"></use></svg><span>Inspections</span></a>
@@ -63,9 +71,11 @@
         <a href="#reports" class="nav-link" data-page="reports"><svg><use href="#i-chart"></use></svg><span>Reports</span></a>
         <a href="#audit" class="nav-link admin-only hidden" data-page="audit"><svg><use href="#i-activity"></use></svg><span>Audit trail</span></a>
         <a href="#users" class="nav-link admin-only hidden" data-page="users"><svg><use href="#i-users"></use></svg><span>Team access</span></a>
+        <p class="nav-caption nav-caption-spaced">ACCOUNT</p>
+        <a href="#profile" class="nav-link" data-page="profile"><svg><use href="#i-users"></use></svg><span>Profile & settings</span></a>
       </nav>
       <div class="sidebar-bottom">
-        <div class="system-state"><span class="pulse-dot"></span><span><b>Database online</b><small>PostgreSQL · Local</small></span></div>
+        <div class="system-state"><span class="pulse-dot"></span><span><b>Connected session</b><small>AutoLedger · Local</small></span></div>
         <div class="profile-row"><span class="avatar" id="profile-avatar">AL</span><span class="profile-copy"><b id="profile-name">Local user</b><small id="profile-role">Viewer</small></span><button class="icon-button profile-logout" data-action="logout" aria-label="Sign out" title="Sign out"><svg><use href="#i-logout"></use></svg></button></div>
       </div>
     </aside>
@@ -75,6 +85,9 @@
         <button class="icon-button menu-toggle" data-action="open-menu" aria-label="Open navigation"><svg><use href="#i-menu"></use></svg></button>
         <div class="breadcrumbs"><span>AutoLedger</span><svg><use href="#i-arrow"></use></svg><b id="breadcrumb-current">Overview</b></div>
         <div class="header-actions">
+          <label id="business-switcher" class="business-switcher hidden">Business
+            <select id="business-selector" aria-label="Active business"></select>
+          </label>
           <label class="global-search"><svg><use href="#i-search"></use></svg><input id="global-search-input" type="search" placeholder="Search VIN, registration, owner..." autocomplete="off"><kbd>Ctrl K</kbd><div id="global-search-results" class="search-results hidden"></div></label>
           <button class="icon-button theme-toggle" data-action="theme" aria-label="Toggle color theme" title="Toggle theme"><svg id="theme-icon"><use href="#i-moon"></use></svg></button>
           <span class="header-divider"></span>
@@ -122,7 +135,20 @@
     <div class="form-error hidden" id="user-form-error" role="alert"></div>
     <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-user">Cancel</button><button type="submit" class="button button-primary" id="user-save">Create account</button></footer>
   </form></dialog>
+  <dialog id="entity-dialog" class="modal-dialog"><form id="entity-form" class="modal-card">
+    <header class="modal-header"><div><p class="eyebrow" id="entity-form-eyebrow">BUSINESS DIRECTORY</p><h2 id="entity-form-title">Add record</h2></div><button type="button" class="icon-button" data-action="close-entity" aria-label="Close"><svg><use href="#i-close"></use></svg></button></header>
+    <div id="entity-fields" class="form-grid"></div>
+    <div class="form-error hidden" id="entity-form-error" role="alert"></div>
+    <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-entity">Cancel</button><button type="submit" class="button button-primary" id="entity-save">Save record</button></footer>
+  </form></dialog>
+  <dialog id="commerce-dialog" class="modal-dialog"><form id="commerce-form" class="modal-card">
+    <header class="modal-header"><div><p class="eyebrow">BUSINESS OPERATIONS</p><h2 id="commerce-form-title">Create transaction</h2></div><button type="button" class="icon-button" data-action="close-commerce" aria-label="Close"><svg><use href="#i-close"></use></svg></button></header>
+    <div id="commerce-fields" class="form-grid"></div>
+    <p class="form-hint">Totals and availability are validated by the API. Inventory status, ownership history, and audit records are managed by backend workflows.</p>
+    <div class="form-error hidden" id="commerce-form-error" role="alert"></div>
+    <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-commerce">Cancel</button><button type="submit" class="button button-primary" id="commerce-save">Submit</button></footer>
+  </form></dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/static/app.js?v=20261012-1" defer></script>
+  <script src="/static/app.js?v=20261109-1" defer></script>
 </body>
 </html>

@@ -16,9 +16,16 @@ logger = logging.getLogger(__name__)
 
 def get_connection():
     try:
+        database_url = os.getenv("DATABASE_URL", "").strip()
+        if database_url:
+            connect_options = {"connect_timeout": 5}
+            if os.getenv("APP_ENV", "development").casefold() == "production":
+                connect_options["sslmode"] = "require"
+            return psycopg2.connect(database_url, **connect_options)
+
         return psycopg2.connect(
             host=os.getenv("DB_HOST", "localhost"),
-            port=os.getenv("DB_PORT", "5432"),
+            port=os.getenv("DB_PORT", "2005"),
             dbname=os.getenv("DB_NAME", "autoledger_db"),
             user=os.getenv("DB_USER", "postgres"),
             password=os.getenv("DB_PASSWORD", ""),

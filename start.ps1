@@ -4,11 +4,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = $PSScriptRoot
-$python = Join-Path $workspaceRoot '.venv\Scripts\python.exe'
 $projectRoot = Join-Path $workspaceRoot 'AutoLedger_Local_Starter'
+$projectPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$workspacePython = Join-Path $workspaceRoot '.venv\Scripts\python.exe'
 
-if (-not (Test-Path $python)) {
-    throw "Virtual environment not found at $python. Create .venv and install requirements first."
+if (Test-Path $projectPython) {
+    $python = $projectPython
+}
+elseif (Test-Path $workspacePython) {
+    $python = $workspacePython
+}
+else {
+    throw "Virtual environment not found. Create .venv in the project or workspace root and install requirements first."
 }
 
 Push-Location $workspaceRoot

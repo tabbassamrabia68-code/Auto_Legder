@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import logging
 from datetime import date
@@ -6,14 +7,16 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.auth import router as auth_router
+from backend.commerce import router as commerce_router
 from backend.database import get_connection
 from backend.records import router as records_router
-from backend.security import require_roles
+from backend.security import require_permissions, require_platform_admin
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
@@ -34,20 +37,58 @@ class OwnershipTransfer(BaseModel):
     transfer_date: date
 
 app = FastAPI(title="AutoLedger API", version="1.0.0")
+APP_ENV = os.getenv("APP_ENV", "development").strip().casefold()
+configured_origins = [
+    value.strip()
+    for value in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+    if value.strip()
+]
+if APP_ENV == "production" and not configured_origins:
+    raise RuntimeError("CORS_ALLOWED_ORIGINS must be configured for production.")
+allowed_origins = configured_origins or [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8001",
+    "http://localhost:8001",
+]
+configured_hosts = [
+    value.strip()
+    for value in os.getenv("TRUSTED_HOSTS", "").split(",")
+    if value.strip()
+]
+if APP_ENV == "production" and not configured_hosts:
+    raise RuntimeError("TRUSTED_HOSTS must be configured for production.")
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=configured_hosts or ["127.0.0.1", "localhost", "testserver"],
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8001",
-        "http://localhost:8001",
-    ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Business-ID"],
 )
 app.include_router(auth_router)
+app.include_router(commerce_router)
 app.include_router(records_router)
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' data: https://fonts.gstatic.com; "
+        "script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    )
+    if APP_ENV == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 
 @app.get("/api/health")
 def health():
@@ -77,7 +118,7 @@ def search_vehicles(
     status: str | None = Query(default=None, pattern="^(ACTIVE|UNASSIGNED)$"),
     sort: str = Query(default="vehicle_id", pattern="^(vehicle_id|registration_no|brand|model_year)$"),
     direction: str = Query(default="asc", pattern="^(asc|desc)$"),
-    user=Depends(require_roles("Admin", "Inspector", "Dealer", "Owner/Viewer")),
+    user=Depends(require_permissions("vehicles.read")),
 ):
     conn = get_connection()
     try:
@@ -119,7 +160,7 @@ def search_vehicles(
         conn.close()
 
 @app.post("/api/vehicles", status_code=201)
-def create_vehicle(vehicle: VehicleCreate, user=Depends(require_roles("Admin", "Dealer"))):
+def create_vehicle(vehicle: VehicleCreate, user=Depends(require_platform_admin())):
     conn = get_connection()
     try:
         with conn:
@@ -159,7 +200,7 @@ def create_vehicle(vehicle: VehicleCreate, user=Depends(require_roles("Admin", "
         conn.close()
 
 @app.get("/api/vehicles/{vehicle_id}")
-def get_vehicle(vehicle_id: int, user=Depends(require_roles("Admin", "Inspector", "Dealer", "Owner/Viewer"))):
+def get_vehicle(vehicle_id: int, user=Depends(require_permissions("vehicles.read"))):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -179,7 +220,7 @@ def get_vehicle(vehicle_id: int, user=Depends(require_roles("Admin", "Inspector"
         conn.close()
 
 @app.put("/api/vehicles/{vehicle_id}")
-def update_vehicle(vehicle_id: int, vehicle: VehicleCreate, user=Depends(require_roles("Admin", "Dealer"))):
+def update_vehicle(vehicle_id: int, vehicle: VehicleCreate, user=Depends(require_platform_admin())):
     conn = get_connection()
     try:
         with conn:
@@ -211,7 +252,7 @@ def update_vehicle(vehicle_id: int, vehicle: VehicleCreate, user=Depends(require
         conn.close()
 
 @app.delete("/api/vehicles/{vehicle_id}", status_code=204)
-def delete_vehicle(vehicle_id: int, user=Depends(require_roles("Admin"))):
+def delete_vehicle(vehicle_id: int, user=Depends(require_platform_admin())):
     conn = get_connection()
     try:
         with conn:
@@ -231,7 +272,7 @@ def delete_vehicle(vehicle_id: int, user=Depends(require_roles("Admin"))):
 def transfer_vehicle_ownership(
     vehicle_id: int,
     transfer: OwnershipTransfer,
-    user=Depends(require_roles("Admin", "Dealer")),
+    user=Depends(require_platform_admin()),
 ):
     conn = get_connection()
     try:
@@ -254,7 +295,7 @@ def transfer_vehicle_ownership(
         conn.close()
 
 @app.get("/api/vehicles/{vehicle_id}/history")
-def vehicle_history(vehicle_id: int, user=Depends(require_roles("Admin", "Inspector", "Dealer", "Owner/Viewer"))):
+def vehicle_history(vehicle_id: int, user=Depends(require_permissions("history.read"))):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

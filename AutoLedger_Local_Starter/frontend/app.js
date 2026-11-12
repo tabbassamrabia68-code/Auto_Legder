@@ -1,38 +1,149 @@
 const state = {
   token: localStorage.getItem("autoledger-token"),
   user: null,
+  businesses: [],
+  businessId: null,
   page: "dashboard",
   pageNumber: 1,
   pageSize: 25,
   detail: null,
   detailTab: "ownership",
   vehicleFilters: { search: "", brand: "", fuel_type: "", model_year: "", status: "", sort: "vehicle_id", direction: "asc" },
-  theme: localStorage.getItem("autoledger-theme") || "light",
+  theme: localStorage.getItem("autoledger-theme") || "dark",
   searchTimer: null,
+  partnerSearch: { suppliers: "", customers: "" },
+  userSearch: "",
+  userRoleFilter: "",
+  userStatusFilter: "",
+  partnerHistory: null,
+  includeInactivePartners: false,
+  commerceSearch: "",
+  commerceStatusFilter: { purchases: "", sales: "", payments: "" },
+  inventoryStatus: "",
 };
+
+const pagePermissions = {
+  dashboard: "vehicles.read",
+  vehicles: "vehicles.read",
+  inventory: "inventory.read",
+  suppliers: "suppliers.read",
+  customers: "customers.read",
+  purchases: "purchases.read",
+  sales: "sales.read",
+  payments: "payments.read",
+  owners: "owners.read",
+  documents: "history.read",
+  inspections: "verification.read",
+  verification: "verification.read",
+  reports: "vehicles.read",
+  audit: "audit.read",
+  users: "users.manage",
+};
+const hasPermission = permission => state.user?.permissions?.includes("*") || state.user?.permissions?.includes(permission);
+const normalizeUser = user => ({ ...user, role: user.role || user.role_name });
+const hasAnyAccess = () => state.user?.permissions?.includes("*") || Boolean(state.user?.permissions?.length);
+
+function canAccessPage(page) {
+  if (page === "profile") return true;
+  if (page === "access") return !hasAnyAccess();
+  if (["inventory", "suppliers", "customers", "purchases", "sales", "payments"].includes(page) && !state.businessId) return false;
+  if (page === "reports") {
+    return hasPermission("vehicles.read") || hasPermission("reports.operational") || hasPermission("reports.financial");
+  }
+  const permission = pagePermissions[page];
+  return !permission || hasPermission(permission);
+}
 
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
 const dateFmt = new Intl.DateTimeFormat("en-PK", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Karachi" });
-const moneyFmt = new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", currencyDisplay: "code", maximumFractionDigits: 0 });
 const dateValue = value => value ? dateFmt.format(new Date(`${String(value).slice(0, 10)}T12:00:00+05:00`)) : "Not recorded";
-const moneyValue = value => moneyFmt.format(Number(value || 0));
+function moneyValue(value) {
+  const raw = String(value ?? "0").trim();
+  const match = raw.match(/^(-?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return "PKR —";
+  const negative = match[1] === "-";
+  const whole = BigInt(match[2]);
+  const fraction = (match[3] || "").padEnd(3, "0");
+  let minor = whole * 100n + BigInt(fraction.slice(0, 2));
+  if (fraction[2] >= "5") minor += 1n;
+  const formattedWhole = (minor / 100n).toLocaleString("en-PK");
+  const formattedMinor = String(minor % 100n).padStart(2, "0");
+  return `PKR${negative ? " -" : " "}${formattedWhole}.${formattedMinor}`;
+}
 const initials = value => String(value || "AL").split(/\s+/).slice(0, 2).map(part => part[0] || "").join("").toUpperCase();
 const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"></use></svg>`;
-const tokenHeader = () => state.token ? { Authorization: `Bearer ${state.token}` } : {};
+const tokenHeader = () => ({
+  ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+  ...(state.businessId ? { "X-Business-ID": String(state.businessId) } : {}),
+});
 
-async function api(url, options = {}) {
+async function loadCurrentUser() {
+  const response = await fetch("/api/auth/me", {
+    credentials: "same-origin",
+    headers: tokenHeader(),
+  });
+  if (!response.ok) throw new Error("Could not load account permissions.");
+  return normalizeUser(await response.json());
+}
+
+async function loadBusinessMemberships() {
+  let businesses;
+  try {
+    businesses = (await api("/api/auth/businesses")).businesses;
+  } catch (error) {
+    if (error.status !== 503) throw error;
+    state.businesses = [];
+    state.businessId = null;
+    return;
+  }
+  state.businesses = businesses;
+  const storageKey = `autoledger-business-${state.user.user_id}`;
+  const savedId = Number(localStorage.getItem(storageKey));
+  const selected = businesses.find(item => item.business_id === savedId) || businesses[0] || null;
+  state.businessId = selected?.business_id || null;
+  if (selected) {
+    localStorage.setItem(storageKey, String(selected.business_id));
+    state.user = {
+      ...state.user,
+      role: selected.role_name,
+      role_name: selected.role_name,
+      permissions: selected.permissions,
+    };
+  }
+}
+
+async function api(url, options = {}, retryWithRefresh = true) {
   const response = await fetch(url, {
     ...options,
+    credentials: "same-origin",
     headers: { ...tokenHeader(), ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers },
   });
   const body = response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401 && state.token) signOut(false);
+    if (response.status === 401 && state.token && retryWithRefresh && url !== "/api/auth/refresh") {
+      const refreshed = await fetch("/api/auth/refresh", { method: "POST", credentials: "same-origin" });
+      if (refreshed.ok) {
+        const session = await refreshed.json();
+        state.token = session.access_token;
+        localStorage.setItem("autoledger-token", state.token);
+        try {
+          state.user = await loadCurrentUser();
+          await loadBusinessMemberships();
+        } catch (error) {
+          signOut(false);
+          throw error;
+        }
+        return api(url, options, false);
+      }
+      signOut(false);
+    }
     const detail = body?.detail;
-    throw new Error(typeof detail === "string" ? detail : "The request could not be completed.");
+    const error = new Error(typeof detail === "string" ? detail : "The request could not be completed.");
+    error.status = response.status;
+    throw error;
   }
   return body;
 }
@@ -70,7 +181,7 @@ function renderAuthForm(mode, setupAccount = null) {
       <form id="bootstrap-form" class="auth-form">
         <label>Account email<input name="email" type="email" required autocomplete="username" value="${esc(setupAccount?.email || "")}" ${setupAccount?.email ? "readonly" : ""}></label>
         <label>Display name<input name="full_name" required maxlength="120" autocomplete="name" value="${esc(setupAccount?.full_name || "")}"></label>
-        <label>Create password<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>
+        <label>Create password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
         <p id="auth-message" class="auth-message" role="alert"></p>
         <button class="button button-primary" type="submit">Initialize administrator ${icon("arrow")}</button>
       </form>
@@ -85,7 +196,7 @@ function renderAuthForm(mode, setupAccount = null) {
     <form id="login-form" class="auth-form">
       ${mode === "register" ? '<label>Full name<input name="full_name" required maxlength="120" autocomplete="name"></label>' : ""}
       <label>Email address<input name="email" type="email" required autocomplete="username"></label>
-      <label>Password<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="current-password"></label>
+      <label>Password<input name="password" type="password" required minlength="${mode === "register" ? 12 : 8}" maxlength="128" autocomplete="${mode === "register" ? "new-password" : "current-password"}"></label>
       <p id="auth-message" class="auth-message" role="alert"></p>
       <button class="button button-primary" type="submit">${mode === "register" ? "Create viewer account" : "Sign in to AutoLedger"} ${icon("arrow")}</button>
     </form>
@@ -110,9 +221,10 @@ async function submitAuth(event) {
     } else {
       const result = await api("/api/auth/login", { method: "POST", body: JSON.stringify(data) });
       state.token = result.access_token;
-      state.user = result.user;
       localStorage.setItem("autoledger-token", state.token);
-      showApplication(result.user.role === "Owner/Viewer" ? "vehicles" : "dashboard");
+      state.user = await loadCurrentUser();
+      await loadBusinessMemberships();
+      showApplication(hasPermission("vehicles.read") ? "dashboard" : "profile");
     }
   } catch (error) {
     showAuthMessage(error.message);
@@ -121,9 +233,18 @@ async function submitAuth(event) {
 }
 
 function signOut(notify = true) {
+  if (state.token) {
+    fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Authorization: `Bearer ${state.token}` },
+    }).catch(error => console.warn("Could not revoke the server refresh session.", error));
+  }
   localStorage.removeItem("autoledger-token");
   state.token = null;
   state.user = null;
+  state.businesses = [];
+  state.businessId = null;
   state.detail = null;
   if (notify) toast("You have signed out.");
   showAuth();
@@ -143,21 +264,59 @@ function showApplication(initialPage = "dashboard") {
   $("#profile-name").textContent = state.user.full_name;
   $("#profile-role").textContent = state.user.role;
   $("#profile-avatar").textContent = initials(state.user.full_name);
-  document.querySelectorAll(".admin-only").forEach(link => link.classList.toggle("hidden", state.user.role !== "Admin"));
+  const switcher = $("#business-switcher");
+  const selector = $("#business-selector");
+  switcher.classList.toggle("hidden", state.businesses.length === 0);
+  selector.innerHTML = state.businesses.map(business =>
+    `<option value="${business.business_id}" ${business.business_id === state.businessId ? "selected" : ""}>${esc(business.business_name)}</option>`
+  ).join("");
+  document.querySelectorAll(".commerce-nav").forEach(link => {
+    link.classList.toggle("hidden", !state.businessId || !canAccessPage(link.dataset.page));
+  });
+  document.querySelectorAll(".nav-link[data-page]").forEach(link => {
+    link.classList.toggle("hidden", !canAccessPage(link.dataset.page));
+  });
+  $(".global-search").classList.toggle("hidden", !hasPermission("vehicles.read") && !hasPermission("owners.read"));
   $("#header-date").textContent = dateFmt.format(new Date());
   applyTheme(state.theme);
   state.page = location.hash.slice(1) || initialPage;
   navigate(state.page);
 }
 
+function changeBusiness(businessId) {
+  const business = state.businesses.find(item => item.business_id === Number(businessId));
+  if (!business || business.business_id === state.businessId) return;
+  state.businessId = business.business_id;
+  localStorage.setItem(`autoledger-business-${state.user.user_id}`, String(business.business_id));
+  state.user = {
+    ...state.user,
+    role: business.role_name,
+    role_name: business.role_name,
+    permissions: business.permissions,
+  };
+  showApplication(state.page);
+}
+
 function titleFor(page) {
-  return ({ dashboard: "Overview", vehicles: "Vehicles", owners: "Owners", documents: "Documents", inspections: "Inspections", verification: "Verification", reports: "Reports", audit: "Audit trail", users: "Team access" })[page] || "Overview";
+  return ({
+    dashboard: "Overview", vehicles: "Vehicles", inventory: "Inventory",
+    suppliers: "Suppliers", customers: "Customers", purchases: "Purchases",
+    sales: "Sales", payments: "Payments", owners: "Owners",
+    documents: "Documents", inspections: "Inspections", verification: "Verification",
+    reports: "Reports", audit: "Audit trail", users: "Team access", profile: "Profile & settings",
+    access: "Access pending",
+  })[page] || "Overview";
 }
 
 function navigate(page) {
-  const allowed = ["dashboard", "vehicles", "owners", "documents", "inspections", "verification", "reports", "audit", "users"];
+  const allowed = ["dashboard", "vehicles", "inventory", "suppliers", "customers", "purchases", "sales", "payments", "owners", "documents", "inspections", "verification", "reports", "audit", "users", "profile", "access"];
   if (!allowed.includes(page)) page = "dashboard";
-  if (["audit", "users"].includes(page) && state.user?.role !== "Admin") page = "vehicles";
+  if (page === "access" && hasAnyAccess()) {
+    page = hasPermission("vehicles.read") ? "dashboard" : "reports";
+  }
+  if (!canAccessPage(page)) {
+    page = hasPermission("vehicles.read") ? "dashboard" : hasAnyAccess() ? "reports" : "access";
+  }
   state.page = page;
   state.pageNumber = 1;
   state.detail = null;
@@ -182,8 +341,12 @@ async function renderPage() {
   page.innerHTML = skeletonPage();
   try {
     if (state.page === "dashboard") await renderDashboard(page);
+    else if (state.page === "access") page.innerHTML = `<section class="module-gate" role="status"><div><h2>Application access is not assigned</h2><p>This verification account cannot access vehicle or business records. Ask an administrator to assign an operational role.</p></div></section>`;
     else if (state.page === "vehicles") await renderVehicles(page);
     else if (state.page === "reports") renderReports(page);
+    else if (state.page === "profile") await renderProfile(page);
+    else if (["suppliers", "customers"].includes(state.page)) await renderPartners(page, state.page);
+    else if (["inventory", "purchases", "sales", "payments"].includes(state.page)) await renderCommercePage(page, state.page);
     else await renderRecordsPage(page, state.page);
     page.focus({ preventScroll: true });
   } catch (error) {
@@ -223,23 +386,23 @@ async function renderDashboard(page) {
   const metrics = data.kpis;
   $("#expiry-nav-count").textContent = metrics.expiring_documents || "";
   $("#expiry-nav-count").classList.toggle("hidden", !metrics.expiring_documents);
-  const addVehicle = ["Admin", "Dealer"].includes(state.user.role) ? `<button class="button button-primary" data-action="new-vehicle">${icon("plus")}Add vehicle</button>` : "";
+  const addVehicle = hasPermission("vehicles.manage") ? `<button class="button button-primary" data-action="new-vehicle">${icon("plus")}Add vehicle</button>` : "";
   page.innerHTML = `${pageHeading("Overview", "A live readout of the fleet ledger and its latest signals.", addVehicle)}
     <section class="kpi-grid" aria-label="Fleet key performance indicators">
       ${kpi("Fleet vehicles", metrics.total_vehicles, "registered records", "car")}
-      ${kpi("Active owners", metrics.active_owners, "current ownership links", "users")}
-      ${kpi("Expiring documents", metrics.expiring_documents, "due in the next 30 days", "file", metrics.expiring_documents ? "warning" : "")}
-      ${kpi("Maintenance this month", moneyValue(metrics.maintenance_cost_month), "service + repair spend", "wrench")}
-      ${kpi("Mileage flags", metrics.mileage_anomalies, "odometer drops detected", "shield", metrics.mileage_anomalies ? "warning" : "")}
+      ${kpi("Active owners", metrics.active_owners ?? "—", "current ownership links", "users")}
+      ${kpi("Expiring documents", metrics.expiring_documents ?? "—", "due in the next 30 days", "file", metrics.expiring_documents ? "warning" : "")}
+      ${hasPermission("financial.read") ? kpi("Maintenance this month", moneyValue(metrics.maintenance_cost_month), "service + repair spend", "wrench") : ""}
+      ${kpi("Mileage flags", metrics.mileage_anomalies ?? "—", "odometer drops detected", "shield", metrics.mileage_anomalies ? "warning" : "")}
     </section>
     <section class="dashboard-grid">
       <div class="dashboard-left">
-        <article class="panel"><header class="panel-heading"><div><h2>Maintenance cost</h2><p>PKR · recent months</p></div><a class="button button-quiet button-small" href="#reports" data-go="reports">Full report ${icon("arrow")}</a></header><div class="panel-content">${chartBars(data.charts.monthly_costs)}</div></article>
+        ${hasPermission("financial.read") ? `<article class="panel"><header class="panel-heading"><div><h2>Maintenance cost</h2><p>PKR · recent months</p></div><a class="button button-quiet button-small" href="#reports" data-go="reports">Full report ${icon("arrow")}</a></header><div class="panel-content">${chartBars(data.charts.monthly_costs)}</div></article>` : ""}
         <article class="panel"><header class="panel-heading"><div><h2>Vehicles by make</h2><p>Fleet composition</p></div><a class="button button-quiet button-small" href="#vehicles" data-go="vehicles">View fleet ${icon("arrow")}</a></header><div class="panel-content">${renderBrandBars(data.charts.vehicles_by_brand)}</div></article>
       </div>
       <div class="dashboard-right">
         <article class="panel"><header class="panel-heading"><div><h2>Fuel mix</h2><p>Recorded powertrains</p></div></header><div class="panel-content">${renderFuelRows(data.charts.fuel_split)}</div></article>
-        <article class="panel activity-panel"><header class="panel-heading"><div><h2>Recent activity</h2><p>Latest ledger changes</p></div>${state.user.role === "Admin" ? '<a class="button button-quiet button-small" href="#audit" data-go="audit">Audit trail</a>' : ""}</header><div class="panel-content">${renderActivity(data.activity)}</div></article>
+        <article class="panel activity-panel"><header class="panel-heading"><div><h2>Recent activity</h2><p>Latest ledger changes</p></div>${hasPermission("audit.read") ? '<a class="button button-quiet button-small" href="#audit" data-go="audit">Audit trail</a>' : ""}</header><div class="panel-content">${renderActivity(data.activity)}</div></article>
       </div>
     </section>`;
 }
@@ -248,9 +411,361 @@ function kpi(label, value, sub, symbol, stateClass = "") {
   return `<article class="kpi"><div class="kpi-top"><span>${esc(label)}</span><span class="kpi-icon ${stateClass}">${icon(symbol)}</span></div><strong>${esc(value)}</strong><small>${esc(sub)}</small></article>`;
 }
 
+function statusBadge(value) {
+  const tone = String(value || "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  return `<span class="badge badge-${tone}">${esc(value || "Not recorded")}</span>`;
+}
+
+async function renderPartners(page, kind) {
+  const isSupplier = kind === "suppliers";
+  const title = isSupplier ? "Suppliers" : "Customers";
+  const field = isSupplier ? "supplier_name" : "customer_name";
+  const result = await api(`/api/${kind}?q=${encodeURIComponent(state.partnerSearch[kind])}&include_inactive=${state.includeInactivePartners}`);
+  const rows = result[kind] || [];
+  const canManage = hasPermission(`${kind}.manage`);
+  const idField = isSupplier ? "supplier_id" : "customer_id";
+  const visibleRows = rows.slice(
+    (state.pageNumber - 1) * state.pageSize,
+    state.pageNumber * state.pageSize,
+  );
+  const action = canManage
+    ? `<button class="button button-primary" data-action="new-entity" data-kind="${kind}">${icon("plus")}Add ${isSupplier ? "supplier" : "customer"}</button>`
+    : "";
+  const body = rows.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>${isSupplier ? "Supplier" : "Customer"}</th><th>Access</th><th>Email</th><th>Phone</th><th>ID</th><th>History</th>${canManage ? "<th>Actions</th>" : ""}</tr></thead><tbody>${visibleRows.map(row => `<tr><td><span class="table-primary">${esc(row[field])}</span></td><td>${statusBadge(row.is_active === false ? "INACTIVE" : "ACTIVE")}</td><td>${esc(row.email || "—")}</td><td>${esc(row.phone || "—")}</td><td>#${esc(row[idField])}</td><td><button class="button button-quiet button-small" data-action="partner-history" data-kind="${kind}" data-id="${row[idField]}">View history</button></td>${canManage ? `<td><button class="button button-quiet button-small" data-action="edit-entity" data-kind="${kind}" data-id="${row[idField]}">Edit</button><button class="button button-quiet button-small" data-action="toggle-partner" data-kind="${kind}" data-id="${row[idField]}" data-active="${row.is_active !== false}">${row.is_active === false ? "Reactivate" : "Deactivate"}</button></td>` : ""}</tr>`).join("")}</tbody></table></div>`
+    : `<div class="empty-state"><div>${icon("users")}<b>No ${title.toLowerCase()} found</b><p>${state.partnerSearch[kind] ? "Try another search." : "No records are available in the directory yet."}</p></div></div>`;
+  let history = "";
+  if (state.partnerHistory?.kind === kind) {
+    try {
+      const { id } = state.partnerHistory;
+      const historyResult = await api(`/api/${kind}/${id}/${isSupplier ? "purchases" : "sales"}`);
+      const transactions = isSupplier ? historyResult.purchases : historyResult.sales;
+      history = `<section class="panel report-help"><header class="panel-heading"><div><h2>${title.slice(0, -1)} transaction history</h2><p>${transactions.length} transaction records</p></div><button class="button button-quiet button-small" data-action="close-partner-history">Close history</button></header>${transactions.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Reference</th><th>Date</th><th>Status</th><th>Total</th><th>Paid</th><th>Balance</th></tr></thead><tbody>${transactions.map(row => { const purchase = isSupplier; const idKey = purchase ? "purchase_id" : "sale_id"; return `<tr><td>${esc(row[purchase ? "purchase_reference" : "sale_reference"] || `#${row[idKey]}`)}</td><td>${esc(dateValue(row[purchase ? "purchase_date" : "sale_date"]))}</td><td>${statusBadge(row[purchase ? "purchase_status" : "sale_status"])}</td><td>${esc(moneyValue(row.total_amount))}</td><td>${esc(moneyValue(row.paid_amount))}</td><td>${esc(moneyValue(row.balance_due))}</td></tr>`; }).join("")}</tbody></table></div>` : '<div class="panel-content">No transactions recorded for this party.</div>'}</section>`;
+    } catch (error) {
+      history = `<section class="module-gate" role="status"><div><h2>History unavailable</h2><p>${esc(error.message)}</p></div><button class="button button-quiet button-small" data-action="close-partner-history">Close</button></section>`;
+    }
+  }
+  page.innerHTML = `${pageHeading(title, `${rows.length} records · search and manage the business directory`, action)}
+    <div class="filter-bar"><label class="filter-search">${icon("search")}<input id="partner-search" data-kind="${kind}" type="search" placeholder="Search ${title.toLowerCase()} by name, email or phone..." value="${esc(state.partnerSearch[kind])}"></label>${canManage ? `<label class="filter-check"><input id="include-inactive-partners" type="checkbox" ${state.includeInactivePartners ? "checked" : ""}>Include inactive</label>` : ""}</div>
+    ${body}${pager(rows.length, state.pageNumber, state.pageSize)}${history}`;
+}
+
+function openEntityForm(kind, record = null) {
+  const isSupplier = kind === "suppliers";
+  const entity = isSupplier ? "supplier" : "customer";
+  const nameField = `${entity}_name`;
+  const form = $("#entity-form");
+  form.reset();
+  form.dataset.kind = kind;
+  form.dataset.id = record?.[`${entity}_id`] || "";
+  $("#entity-form-title").textContent = `${record ? "Edit" : "Add"} ${entity}`;
+  $("#entity-form-eyebrow").textContent = isSupplier ? "SUPPLIER DIRECTORY" : "CUSTOMER DIRECTORY";
+  $("#entity-save").textContent = record ? "Save changes" : `Add ${entity}`;
+  $("#entity-form-error").classList.add("hidden");
+  $("#entity-fields").innerHTML = `
+    <label>${isSupplier ? "Supplier" : "Customer"} name <span>*</span><input name="${nameField}" required maxlength="150" value="${esc(record?.[nameField] || "")}"></label>
+    <label>Email address<input name="email" type="email" maxlength="150" value="${esc(record?.email || "")}"></label>
+    <label>Phone<input name="phone" type="tel" maxlength="30" value="${esc(record?.phone || "")}"></label>`;
+  $("#entity-dialog").showModal();
+}
+
+async function saveEntity(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!form.reportValidity()) return;
+  const kind = form.dataset.kind;
+  const id = form.dataset.id;
+  const payload = Object.fromEntries(new FormData(form));
+  for (const key of ["email", "phone"]) if (!payload[key].trim()) payload[key] = null;
+  const button = $("#entity-save");
+  button.disabled = true;
+  button.textContent = "Saving...";
+  try {
+    await api(id ? `/api/${kind}/${id}` : `/api/${kind}`, {
+      method: id ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    });
+    $("#entity-dialog").close();
+    toast(`${kind === "suppliers" ? "Supplier" : "Customer"} ${id ? "updated" : "added"}.`);
+    await renderPage();
+  } catch (error) {
+    $("#entity-form-error").textContent = error.message;
+    $("#entity-form-error").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+    button.textContent = id ? "Save changes" : `Add ${kind === "suppliers" ? "supplier" : "customer"}`;
+  }
+}
+
+function commerceUnavailable(page, error) {
+  const explanation = error.status === 503
+    ? "This module is unavailable because the proposed commerce schema has not been installed. The database migration is still pending separate approval; existing vehicle and history records are unaffected."
+    : error.message;
+  page.innerHTML = `${pageHeading(titleFor(state.page), "Live records are loaded from the AutoLedger API.")}
+    <section class="module-gate" role="status"><span class="gate-icon">${icon(error.status === 503 ? "shield" : "activity")}</span><div><h2>${error.status === 503 ? "Module not enabled" : "Unable to load this module"}</h2><p>${esc(explanation)}</p>${error.status === 503 ? '<small>Commerce operations remain safely disabled until an approved migration is applied.</small>' : ""}</div></section>`;
+}
+
+async function renderCommercePage(page, kind) {
+  const titles = {
+    inventory: ["Inventory", "Current stock status and evidence-backed vehicle onboarding."],
+    purchases: ["Purchases", "Acquisition history and supplier balances."],
+    sales: ["Sales", "Completed vehicle sales and customer balances."],
+    payments: ["Payments", "Payment events and outstanding transaction balances."],
+  };
+  const [title, subtitle] = titles[kind];
+  const permissionByKind = {
+    inventory: "inventory.manage",
+    purchases: "purchases.manage",
+    sales: "sales.manage",
+    payments: "payments.manage",
+  };
+  const canManage = hasPermission(permissionByKind[kind]);
+  const params = new URLSearchParams();
+  if (kind === "inventory") {
+    params.set("page", String(state.pageNumber));
+    params.set("page_size", String(state.pageSize));
+    if (state.commerceSearch.trim()) params.set("q", state.commerceSearch.trim());
+    if (state.inventoryStatus) params.set("stock_status", state.inventoryStatus);
+  }
+  const suffix = kind === "inventory" ? `?${params}` : "";
+  let result;
+  try {
+    result = await api(`/api/${kind}${suffix}`);
+  } catch (error) {
+    commerceUnavailable(page, error);
+    return;
+  }
+
+  const sourceRows = kind === "inventory" ? result.vehicles : result[kind];
+  const rows = kind !== "inventory" && state.commerceSearch.trim()
+    ? sourceRows.filter(row => JSON.stringify(row).toLowerCase().includes(state.commerceSearch.trim().toLowerCase()))
+    : sourceRows;
+  const statusField = kind === "purchases" ? "purchase_status" : kind === "sales" ? "sale_status" : "payment_status";
+  const filteredRows = ["purchases", "sales", "payments"].includes(kind) && state.commerceStatusFilter[kind]
+    ? rows.filter(row => row[statusField] === state.commerceStatusFilter[kind])
+    : rows;
+  const visibleRows = kind === "inventory"
+    ? filteredRows
+    : filteredRows.slice((state.pageNumber - 1) * state.pageSize, state.pageNumber * state.pageSize);
+  let action = "";
+  if (canManage && ["purchases", "sales", "payments"].includes(kind)) {
+    action = `<button class="button button-primary" data-action="new-commerce" data-kind="${kind}">${icon("plus")}${kind === "purchases" ? "Record purchase" : kind === "sales" ? "Create sale" : "Record payment"}</button>`;
+  }
+  const inventorySummary = kind === "inventory"
+    ? `<section class="kpi-grid commerce-kpis">${kpi("Vehicles in view", result.total, "matching registry entries", "car")}${kpi("Acquisition value", moneyValue(result.acquisition_valuation), "recorded purchases only", "file")}${kpi("Asking value", moneyValue(result.asking_valuation), "listed asking prices", "chart")}</section>`
+    : "";
+  const statusOptions = kind === "purchases"
+    ? ["DRAFT", "ORDERED", "RECEIVED"]
+    : kind === "sales"
+      ? ["DRAFT", "CONFIRMED", "COMPLETED", "CANCELLED"]
+      : ["PENDING", "COMPLETED", "FAILED", "VOIDED"];
+  const tools = `<div class="filter-bar"><label class="filter-search">${icon("search")}<input id="commerce-search" type="search" placeholder="Search vehicle, customer or reference..." value="${esc(state.commerceSearch)}"></label>${kind === "inventory" ? `<select id="inventory-status" aria-label="Filter by stock status"><option value="">All stock states</option>${["AVAILABLE", "RESERVED", "SOLD", "UNDER_MAINTENANCE", "UNTRACKED"].map(item => `<option ${state.inventoryStatus === item ? "selected" : ""}>${item}</option>`).join("")}</select>` : ["purchases", "sales", "payments"].includes(kind) ? `<select id="commerce-status-filter" data-kind="${kind}" aria-label="Filter ${kind} by status"><option value="">All statuses</option>${statusOptions.map(item => `<option value="${item}" ${state.commerceStatusFilter[kind] === item ? "selected" : ""}>${item.replaceAll("_", " ")}</option>`).join("")}</select>` : ""}</div>`;
+  const canReadFinance = hasPermission("invoices.read");
+  const total = kind === "inventory" ? result.total : filteredRows.length;
+  page.innerHTML = `${pageHeading(title, subtitle, action)}${inventorySummary}${tools}${commerceTable(kind, visibleRows || [], canManage, canReadFinance)}${pager(total, state.pageNumber, state.pageSize)}`;
+}
+
+function commerceTable(kind, rows, canManage, canReadFinance) {
+  if (!rows.length) return `<div class="empty-state"><div>${icon(kind === "inventory" ? "car" : "file")}<b>No ${esc(kind)} records found</b><p>${state.commerceSearch ? "Try clearing or changing the search." : "There are no matching records from the database."}</p></div></div>`;
+  if (kind === "inventory") {
+    return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Vehicle</th><th>Condition</th><th>Stock status</th><th>Acquisition cost</th><th>Asking price</th>${canManage ? "<th>Action</th>" : ""}</tr></thead><tbody>${rows.map(row => `<tr><td><span class="table-primary">${esc(row.registration_no)} · ${esc(row.brand)} ${esc(row.model)}</span><span class="table-secondary">${esc(row.vin)} · ${esc(row.model_year)}</span></td><td>${esc(row.vehicle_condition)}</td><td>${statusBadge(row.stock_status)}</td><td>${row.acquisition_cost == null ? "—" : esc(moneyValue(row.acquisition_cost))}</td><td>${row.asking_price == null ? "—" : esc(moneyValue(row.asking_price))}</td>${canManage ? `<td>${row.stock_status === "UNTRACKED" ? `<button class="button button-quiet button-small" data-action="onboard-inventory" data-id="${row.vehicle_id}">Onboard with evidence</button>` : ["AVAILABLE", "UNDER_MAINTENANCE"].includes(row.stock_status) ? `<button class="button button-quiet button-small" data-action="toggle-inventory" data-id="${row.vehicle_id}" data-status="${row.stock_status}">${row.stock_status === "AVAILABLE" ? "Mark maintenance" : "Mark available"}</button>` : "—"}</td>` : ""}</tr>`).join("")}</tbody></table></div>`;
+  }
+  if (kind === "purchases" || kind === "sales") {
+    const purchase = kind === "purchases";
+    return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Reference</th><th>${purchase ? "Supplier" : "Customer"}</th><th>Date</th><th>Status</th><th>Total</th><th>Paid</th><th>Due</th>${!purchase && canReadFinance ? "<th>Invoice</th>" : ""}</tr></thead><tbody>${rows.map(row => { const id = purchase ? row.purchase_id : row.sale_id; const completed = row[purchase ? "purchase_status" : "sale_status"] === (purchase ? "RECEIVED" : "COMPLETED"); return `<tr><td><span class="table-primary">${esc(row[purchase ? "purchase_reference" : "sale_reference"] || `#${id}`)}</span></td><td>${esc(purchase ? row.supplier_name || "Supplier not recorded" : row.customer_name || "Customer not recorded")}</td><td>${esc(dateValue(row[purchase ? "purchase_date" : "sale_date"]))}</td><td>${statusBadge(row[purchase ? "purchase_status" : "sale_status"])}</td><td>${esc(moneyValue(row.total_amount))}</td><td>${esc(moneyValue(row.paid_amount))}</td><td><b>${esc(moneyValue(row.balance_due))}</b></td>${!purchase && canReadFinance ? `<td>${completed ? `<button class="button button-quiet button-small" data-action="download-financial-pdf" data-path="/api/sales/${id}/invoice.pdf" data-filename="autoledger-invoice-${id}.pdf">Invoice PDF</button>` : "—"}</td>` : ""}</tr>`; }).join("")}</tbody></table></div>`;
+  }
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Payment reference</th><th>Against</th><th>Date</th><th>Method</th><th>Status</th><th>Amount</th>${canReadFinance ? "<th>Receipt</th>" : ""}</tr></thead><tbody>${rows.map(row => `<tr><td><span class="table-primary">${esc(row.payment_reference)}</span><span class="table-secondary">${esc(row.payment_kind)}</span></td><td>${row.sale_id ? `Sale #${esc(row.sale_id)}` : `Purchase #${esc(row.purchase_id)}`}</td><td>${esc(dateFmt.format(new Date(row.payment_date)))}</td><td>${esc(row.payment_method)}</td><td>${statusBadge(row.payment_status)}</td><td>${esc(moneyValue(row.amount))}</td>${canReadFinance ? `<td>${row.payment_status === "COMPLETED" ? `<button class="button button-quiet button-small" data-action="download-financial-pdf" data-path="/api/payments/${row.payment_id}/receipt.pdf" data-filename="autoledger-receipt-${row.payment_id}.pdf">Receipt PDF</button>` : "—"}</td>` : ""}</tr>`).join("")}</tbody></table></div>`;
+}
+
+function vehicleSelectOptions(vehicles, selectedId = "") {
+  return vehicles.map(vehicle => `<option value="${vehicle.vehicle_id}" ${Number(selectedId) === Number(vehicle.vehicle_id) ? "selected" : ""}>${esc(vehicle.registration_no)} · ${esc(vehicle.brand)} ${esc(vehicle.model)} · ${esc(vehicle.vin)}</option>`).join("");
+}
+
+function transactionItemField(kind, vehicles, allowRemove = true) {
+  const purchase = kind === "purchases";
+  return `<div class="transaction-line">
+    <label>Vehicle <span>*</span><select name="vehicle_id" required><option value="">Select a vehicle</option>${vehicleSelectOptions(vehicles)}</select></label>
+    <label>${purchase ? "Purchase price" : "Selling price"} · PKR <span>*</span><input name="unit_price" type="number" min="0" step="0.01" required></label>
+    ${purchase ? "" : '<label>Discount · PKR<input name="discount_amount" type="number" min="0" step="0.01" value="0"></label>'}
+    ${allowRemove ? '<button type="button" class="icon-action remove-line" data-action="remove-transaction-line" aria-label="Remove item" title="Remove item">' + icon("close") + "</button>" : ""}
+  </div>`;
+}
+
+async function openCommerceForm(kind, vehicleId = "") {
+  const form = $("#commerce-form");
+  form.reset();
+  form.dataset.kind = kind;
+  form.dataset.paymentIdempotencyKey = kind === "payments" ? crypto.randomUUID() : "";
+  $("#commerce-form-error").classList.add("hidden");
+  $("#commerce-form-title").textContent = ({
+    purchases: "Record vehicle purchase",
+    sales: "Create vehicle sale",
+    payments: "Record payment",
+    inventory: "Onboard vehicle inventory",
+  })[kind];
+  $("#commerce-save").textContent = "Submit";
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  let html = "";
+  if (kind === "purchases") {
+    const [supplierData, vehicleData] = await Promise.all([
+      api("/api/suppliers"),
+      api("/api/vehicles?page_size=100"),
+    ]);
+    html = `<label>Supplier <span>*</span><select name="supplier_id" required><option value="">Select supplier</option>${supplierData.suppliers.map(row => `<option value="${row.supplier_id}">${esc(row.supplier_name)}</option>`).join("")}</select></label>
+      <label>Purchase date <span>*</span><input name="purchase_date" type="date" value="${today}" required></label>
+      <label>Reference<input name="purchase_reference" maxlength="50"></label>
+      <div class="transaction-lines" id="transaction-lines">${transactionItemField(kind, vehicleData.vehicles, false)}</div>
+      <button type="button" class="button button-quiet button-small item-add" data-action="add-transaction-item">Add another vehicle</button>
+      ${initialPaymentFields()}`;
+    form.dataset.vehicleOptions = JSON.stringify(vehicleData.vehicles);
+  } else if (kind === "sales") {
+    const [customerData, inventoryData] = await Promise.all([
+      api("/api/customers"),
+      api("/api/inventory?stock_status=AVAILABLE&page_size=100"),
+    ]);
+    const available = inventoryData.vehicles.filter(row => row.stock_status === "AVAILABLE");
+    if (!available.length) throw new Error("No available, onboarded inventory is ready for sale.");
+    html = `<label>Customer <span>*</span><select name="customer_id" required><option value="">Select customer</option>${customerData.customers.map(row => `<option value="${row.customer_id}">${esc(row.customer_name)}</option>`).join("")}</select></label>
+      <label>Sale date <span>*</span><input name="sale_date" type="date" value="${today}" required></label>
+      <label>Reference<input name="sale_reference" maxlength="50"></label>
+      <div class="transaction-lines" id="transaction-lines">${transactionItemField(kind, available, false)}</div>
+      <button type="button" class="button button-quiet button-small item-add" data-action="add-transaction-item">Add another vehicle</button>
+      <p class="form-hint span-two">Tax is currently disabled. Each vehicle must be available in inventory; the server checks and locks stock during sale.</p>
+      ${initialPaymentFields()}`;
+    form.dataset.vehicleOptions = JSON.stringify(available);
+  } else if (kind === "inventory") {
+    const vehicleData = await api("/api/vehicles?page_size=100");
+    html = `<label>Vehicle <span>*</span><select name="vehicle_id" required><option value="">Select vehicle</option>${vehicleSelectOptions(vehicleData.vehicles, vehicleId)}</select></label>
+      <label>Condition<select name="vehicle_condition"><option>UNKNOWN</option><option>NEW</option><option>EXCELLENT</option><option>GOOD</option><option>FAIR</option><option>POOR</option><option>DAMAGED</option></select></label>
+      <label>Asking price · PKR<input name="asking_price" type="number" min="0" step="0.01"></label>
+      <label>Source reference<input name="source_reference" maxlength="120"></label>
+      <label class="span-two">Inventory source evidence <span>*</span><textarea name="source_note" rows="3" maxlength="500" required placeholder="Explain how current inventory status was verified"></textarea></label>
+      <p class="form-hint span-two">Onboarding does not create historical purchases or alter ownership history.</p>`;
+  } else if (kind === "payments") {
+    const [purchaseData, saleData] = await Promise.all([api("/api/purchases"), api("/api/sales")]);
+    const purchaseOptions = purchaseData.purchases.map(row => `<option value="purchase:${row.purchase_id}">Purchase ${esc(row.purchase_reference || `#${row.purchase_id}`)} · due ${esc(moneyValue(row.balance_due))}</option>`);
+    const saleOptions = saleData.sales.map(row => `<option value="sale:${row.sale_id}">Sale ${esc(row.sale_reference || `#${row.sale_id}`)} · due ${esc(moneyValue(row.balance_due))}</option>`);
+    html = `<label>Transaction <span>*</span><select name="parent" required><option value="">Select transaction</option><optgroup label="Purchases">${purchaseOptions.join("")}</optgroup><optgroup label="Sales">${saleOptions.join("")}</optgroup></select></label>
+      <label>Amount · PKR <span>*</span><input name="amount" type="number" min="0.01" step="0.01" required></label>
+      <label>Payment method <span>*</span><select name="payment_method" required>${paymentMethods()}</select></label>
+      <label>Status<select name="payment_status"><option>COMPLETED</option><option>PENDING</option><option>FAILED</option></select></label>
+      <label class="span-two">External reference<input name="external_reference" maxlength="120"></label>`;
+  }
+  $("#commerce-fields").innerHTML = html;
+  $("#commerce-dialog").showModal();
+}
+
+function initialPaymentFields() {
+  return `<div class="transaction-payment">
+    <h3>Initial payment <span>Optional</span></h3>
+    <label>Amount · PKR<input name="initial_payment_amount" type="number" min="0" step="0.01" placeholder="Leave blank if unpaid"></label>
+    <label>Method<select name="initial_payment_method"><option value="">Choose if entering payment</option>${paymentMethods()}</select></label>
+    <label>Status<select name="initial_payment_status"><option>COMPLETED</option><option>PENDING</option></select></label>
+  </div>`;
+}
+
+function paymentMethods() {
+  return ["CASH", "BANK_TRANSFER", "CARD", "CHEQUE", "MOBILE_WALLET", "OTHER"]
+    .map(method => `<option>${method}</option>`).join("");
+}
+
+function addTransactionItem() {
+  const form = $("#commerce-form");
+  const kind = form.dataset.kind;
+  const vehicles = JSON.parse(form.dataset.vehicleOptions || "[]");
+  $("#transaction-lines").insertAdjacentHTML("beforeend", transactionItemField(kind, vehicles));
+}
+
+async function saveCommerce(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!form.reportValidity()) return;
+  const kind = form.dataset.kind;
+  const fields = Object.fromEntries(new FormData(form));
+  const button = $("#commerce-save");
+  button.disabled = true;
+  button.textContent = "Submitting...";
+  $("#commerce-form-error").classList.add("hidden");
+  try {
+    let path = `/api/${kind}`;
+    let payload;
+    if (kind === "inventory") {
+      path = `/api/inventory/${fields.vehicle_id}`;
+      payload = {
+        vehicle_condition: fields.vehicle_condition,
+        source_note: fields.source_note,
+        source_reference: fields.source_reference || null,
+        asking_price: fields.asking_price ? Number(fields.asking_price) : null,
+      };
+    } else if (kind === "payments") {
+      const [parentKind, id] = fields.parent.split(":");
+      payload = {
+        [`${parentKind}_id`]: Number(id),
+        amount: fields.amount,
+        payment_method: fields.payment_method,
+        payment_status: fields.payment_status,
+        external_reference: fields.external_reference || null,
+        idempotency_key: form.dataset.paymentIdempotencyKey,
+      };
+    } else {
+      const purchase = kind === "purchases";
+      const items = [...form.querySelectorAll(".transaction-line")].map(line => {
+        const vehicleId = line.querySelector('[name="vehicle_id"]').value;
+        const price = line.querySelector('[name="unit_price"]').value;
+        return purchase
+          ? { vehicle_id: Number(vehicleId), purchase_price: price }
+          : {
+            vehicle_id: Number(vehicleId),
+            selling_price: price,
+            discount_amount: line.querySelector('[name="discount_amount"]').value || "0",
+            tax_amount: "0",
+          };
+      });
+      if (new Set(items.map(item => item.vehicle_id)).size !== items.length) {
+        throw new Error("Select each vehicle only once in a transaction.");
+      }
+      payload = purchase
+        ? { supplier_id: Number(fields.supplier_id), purchase_date: fields.purchase_date, purchase_reference: fields.purchase_reference || null, items }
+        : { customer_id: Number(fields.customer_id), sale_date: fields.sale_date, sale_reference: fields.sale_reference || null, items };
+      if (fields.initial_payment_amount) {
+        if (!fields.initial_payment_method) throw new Error("Choose a payment method or clear the initial payment amount.");
+        payload.initial_payment = {
+          amount: fields.initial_payment_amount,
+          payment_method: fields.initial_payment_method,
+          payment_status: fields.initial_payment_status,
+        };
+      }
+    }
+    if (kind === "purchases" || kind === "sales") {
+      const verb = kind === "purchases" ? "receive this purchase" : "complete this sale";
+      if (!window.confirm(`Confirm ${verb} for ${payload.items.length} vehicle${payload.items.length === 1 ? "" : "s"}? The API will validate the full transaction before committing.`)) return;
+    }
+    await api(path, { method: "POST", body: JSON.stringify(payload) });
+    $("#commerce-dialog").close();
+    toast(kind === "inventory" ? "Vehicle added to tracked inventory." : `${kind.slice(0, -1)} recorded.`);
+    await renderPage();
+  } catch (error) {
+    $("#commerce-form-error").textContent = error.message;
+    $("#commerce-form-error").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Submit";
+  }
+}
+
+async function toggleInventoryStatus(vehicleId, currentStatus) {
+  const nextStatus = currentStatus === "AVAILABLE" ? "UNDER_MAINTENANCE" : "AVAILABLE";
+  await api(`/api/inventory/${vehicleId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ stock_status: nextStatus }),
+  });
+  toast(`Inventory status changed to ${nextStatus}.`);
+  await renderPage();
+}
+
 function vehicleActionButtons(vehicle) {
-  const edit = ["Admin", "Dealer"].includes(state.user.role) ? `<button class="icon-action" title="Edit vehicle" aria-label="Edit vehicle" data-action="edit-vehicle" data-id="${vehicle.vehicle_id}">${icon("file")}</button>` : "";
-  const remove = state.user.role === "Admin" ? `<button class="icon-action" title="Delete vehicle" aria-label="Delete vehicle" data-action="delete-vehicle" data-id="${vehicle.vehicle_id}">${icon("close")}</button>` : "";
+  const edit = hasPermission("vehicles.manage") ? `<button class="icon-action" title="Edit vehicle" aria-label="Edit vehicle" data-action="edit-vehicle" data-id="${vehicle.vehicle_id}">${icon("file")}</button>` : "";
+  const remove = hasPermission("vehicles.delete") ? `<button class="icon-action" title="Delete vehicle" aria-label="Delete vehicle" data-action="delete-vehicle" data-id="${vehicle.vehicle_id}">${icon("close")}</button>` : "";
   return `<span class="table-actions"><button class="button button-quiet button-small" data-action="vehicle-detail" data-id="${vehicle.vehicle_id}">Open ${icon("arrow")}</button>${edit}${remove}</span>`;
 }
 
@@ -278,7 +793,7 @@ async function renderVehicles(page) {
     api(`/api/vehicles?${params}`),
     api("/api/vehicles?page_size=100"),
   ]);
-  const rolesCanEdit = ["Admin", "Dealer"].includes(state.user.role);
+  const rolesCanEdit = hasPermission("vehicles.manage");
   const action = rolesCanEdit ? `<button class="button button-primary" data-action="new-vehicle">${icon("plus")}Add vehicle</button>` : "";
   const brands = [...new Set(allVehicles.vehicles.map(vehicle => vehicle.brand))].sort();
   const fuels = [...new Set(allVehicles.vehicles.map(vehicle => vehicle.fuel_type).filter(Boolean))].sort();
@@ -320,16 +835,18 @@ const recordForms = {
 };
 
 function recordActionFor(key) {
-  const allowed = {
-    owners: ["Admin", "Dealer"],
-    documents: ["Admin", "Inspector", "Dealer"],
-    inspections: ["Admin", "Inspector"],
-    verification: ["Admin", "Inspector"],
-    services: ["Admin", "Dealer", "Inspector"],
-    repairs: ["Admin", "Dealer", "Inspector"],
-    mileage: ["Admin", "Dealer", "Inspector"],
-  }[key] || [];
-  return allowed.includes(state.user.role) ? `<button class="button button-primary" data-action="new-record" data-resource="${key}">${icon("plus")}Add record</button>` : "";
+  const permission = {
+    owners: "owners.manage",
+    documents: "history.manage",
+    inspections: "verification.manage",
+    verification: "verification.manage",
+    services: "history.manage",
+    repairs: "history.manage",
+    mileage: "history.manage",
+  }[key];
+  return permission && hasPermission(permission)
+    ? `<button class="button button-primary" data-action="new-record" data-resource="${key}">${icon("plus")}Add record</button>`
+    : "";
 }
 
 function openRecordForm(resource, vehicleId = "", record = null) {
@@ -365,16 +882,19 @@ function recordButtons(resource, record) {
   if (resource === "users") {
     return `<button class="button button-quiet button-small" data-action="edit-user" data-id="${esc(record.user_id)}" data-role="${esc(record.role_name)}" data-active="${record.is_active ? "true" : "false"}">Manage access</button>`;
   }
-  const editRoles = {
-    owners: ["Admin", "Dealer"], documents: ["Admin", "Inspector", "Dealer"],
-    inspections: ["Admin", "Inspector"], verification: ["Admin", "Inspector"],
-    services: ["Admin", "Dealer", "Inspector"], repairs: ["Admin", "Dealer", "Inspector"],
-    mileage: ["Admin", "Dealer", "Inspector"],
-  }[resource] || [];
-  const edit = editRoles.includes(state.user.role)
+  const editPermission = {
+    owners: "owners.manage",
+    documents: "history.manage",
+    inspections: "verification.manage",
+    verification: "verification.manage",
+    services: "history.manage",
+    repairs: "history.manage",
+    mileage: "history.manage",
+  }[resource];
+  const edit = editPermission && hasPermission(editPermission)
     ? `<button class="icon-action" title="Edit record" aria-label="Edit record" data-action="edit-record" data-resource="${resource}" data-id="${esc(recordId)}">${icon("file")}</button>`
     : "";
-  const remove = state.user.role === "Admin"
+  const remove = hasPermission("users.manage")
     ? `<button class="icon-action" title="Delete record" aria-label="Delete record" data-action="delete-record" data-resource="${resource}" data-id="${esc(recordId)}">${icon("close")}</button>`
     : "";
   return `${edit}${remove}`;
@@ -391,7 +911,7 @@ async function renderRecordsPage(page, key) {
   const config = recordPage[key];
   if (!config) return;
   const [title, subtitle, resource] = config;
-  if (key === "audit" && state.user.role !== "Admin") {
+  if (key === "audit" && !hasPermission("audit.read")) {
     page.innerHTML = `${pageHeading(title, subtitle)}<div class="denied-note">Audit log access is limited to administrators.</div>`;
     return;
   }
@@ -400,29 +920,142 @@ async function renderRecordsPage(page, key) {
     : await api(`/api/records/${resource}?page=${state.pageNumber}&page_size=${state.pageSize}&q=${encodeURIComponent(state.recordSearch || "")}`);
   const userColumns = [["full_name", "Name"], ["email", "Email"], ["role_name", "Role"], ["is_active", "Access"], ["created_at", "Created"]];
   const selectedColumns = key === "users" ? userColumns : columns[key];
-  const canManageRows = key === "users" || ["owners", "documents", "inspections", "verification"].includes(key);
+  const filteredItems = key === "users"
+    ? result.items.filter(item => {
+      const term = state.userSearch.trim().toLowerCase();
+      return (!term || [item.full_name, item.email, item.role_name].some(value => String(value || "").toLowerCase().includes(term)))
+        && (!state.userRoleFilter || item.role_name === state.userRoleFilter)
+        && (!state.userStatusFilter || String(item.is_active) === state.userStatusFilter);
+    })
+    : result.items;
+  const visibleItems = key === "users"
+    ? filteredItems.slice((state.pageNumber - 1) * state.pageSize, state.pageNumber * state.pageSize)
+    : result.items;
+  const total = key === "users" ? filteredItems.length : result.total;
+  const canManageRows = key === "users"
+    ? hasPermission("users.manage")
+    : ["owners", "documents", "inspections", "verification"].some(resource =>
+      hasPermission(resource === "owners" ? "owners.manage" : ["inspections", "verification"].includes(resource) ? "verification.manage" : "history.manage")
+    );
   const displayColumns = canManageRows ? [...selectedColumns, ["__actions", "Actions"]] : selectedColumns;
   const usersAction = key === "users" ? `<button class="button button-primary" data-action="new-user">${icon("plus")}Add user</button>` : recordActionFor(key);
-  const hasSearch = !["users"].includes(key);
-  const rows = result.items.length ? `<div class="table-wrap"><table class="data-table"><thead><tr>${displayColumns.map(([, label]) => `<th>${esc(label)}</th>`).join("")}</tr></thead><tbody>${result.items.map(record => `<tr>${displayColumns.map(([field]) => `<td>${field === "__actions" ? `<span class="table-actions">${recordButtons(key, record)}</span>` : field === "is_active" ? `<span class="badge ${record[field] ? "badge-active" : "badge-expired"}">${record[field] ? "Active" : "Inactive"}</span>` : cellValue(field, record[field])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div>${icon(key === "documents" ? "file" : "activity")}<b>No ${esc(title.toLowerCase())} found</b><p>There are no matching records in this part of the ledger.</p></div></div>`;
+  const hasSearch = true;
   const expiring = key === "documents" ? result.items.filter(item => item.status !== "EXPIRED" && Number(item.days_until_expiry) <= 30).length : 0;
+  const searchId = key === "users" ? "user-search" : "record-search";
+  const searchValue = key === "users" ? state.userSearch : state.recordSearch || "";
+  const searchTools = `<div class="filter-bar"><label class="filter-search">${icon("search")}<input id="${searchId}" type="search" placeholder="Search ${esc(title.toLowerCase())}..." value="${esc(searchValue)}"></label>${key === "documents" ? `<span class="badge badge-pending">${expiring} due soon</span>` : ""}${key === "users" ? `<select id="user-role-filter" aria-label="Filter users by role"><option value="">All roles</option>${[...new Set(result.items.map(item => item.role_name))].sort().map(role => `<option value="${esc(role)}" ${state.userRoleFilter === role ? "selected" : ""}>${esc(role)}</option>`).join("")}</select><select id="user-status-filter" aria-label="Filter users by status"><option value="">All access states</option><option value="true" ${state.userStatusFilter === "true" ? "selected" : ""}>Active</option><option value="false" ${state.userStatusFilter === "false" ? "selected" : ""}>Inactive</option></select>` : ""}</div>`;
+  const rows = total ? `<div class="table-wrap"><table class="data-table"><thead><tr>${displayColumns.map(([, label]) => `<th>${esc(label)}</th>`).join("")}</tr></thead><tbody>${visibleItems.map(record => `<tr>${displayColumns.map(([field]) => `<td>${field === "__actions" ? `<span class="table-actions">${recordButtons(key, record)}</span>` : field === "is_active" ? `<span class="badge ${record[field] ? "badge-active" : "badge-expired"}">${record[field] ? "Active" : "Inactive"}</span>` : cellValue(field, record[field])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div>${icon(key === "documents" ? "file" : "activity")}<b>No ${esc(title.toLowerCase())} found</b><p>There are no matching records in this part of the ledger.</p></div></div>`;
   if (key === "documents") $("#expiry-nav-count").classList.toggle("hidden", !expiring);
-  page.innerHTML = `${pageHeading(title, subtitle, usersAction)}${hasSearch ? `<div class="filter-bar"><label class="filter-search">${icon("search")}<input id="record-search" type="search" placeholder="Search ${esc(title.toLowerCase())}..." value="${esc(state.recordSearch || "")}"></label>${key === "documents" ? `<span class="badge badge-pending">${expiring} due soon</span>` : ""}</div>` : ""}${rows}${pager(result.total, result.page, result.page_size)}`;
+  page.innerHTML = `${pageHeading(title, subtitle, usersAction)}${hasSearch ? searchTools : ""}${rows}${pager(total, key === "users" ? state.pageNumber : result.page, key === "users" ? state.pageSize : result.page_size)}`;
 }
 
 function renderReports(page) {
-  const action = `<button class="button button-primary" data-action="export-csv">${icon("download")}Export fleet CSV</button>`;
+  const canReadVehicles = hasPermission("vehicles.read");
+  const canReadFinancial = Boolean(state.businessId) && hasPermission("reports.financial");
+  const action = canReadVehicles ? `<button class="button button-primary" data-action="export-csv">${icon("download")}Export fleet CSV</button>` : "";
   page.innerHTML = `${pageHeading("Reports", "Export fleet records or open a printer-ready vehicle history.", action)}
-    <section class="panel"><header class="panel-heading"><div><h2>Vehicle ledger export</h2><p>Current owner, vehicle identifiers, mileage and last service.</p></div></header><div class="panel-content report-controls"><label>Make filter<select id="report-brand"><option value="">All makes</option></select></label><label>Created from<input id="report-from" type="date"></label><label>Created to<input id="report-to" type="date"></label><button class="button button-quiet" data-action="export-csv">${icon("download")}Download CSV</button><p class="report-note">For a printable vehicle history, open a vehicle from the registry and choose “Print report”. In the print dialog, select “Save as PDF”.</p></div></section>
-    <section class="panel report-help"><header class="panel-heading"><div><h2>Maintenance spend</h2><p>Service and repair costs grouped by month in PKR.</p></div></header><div class="panel-content" id="report-cost-chart"><div class="skeleton skeleton-block"></div></div></section>`;
-  api("/api/dashboard").then(data => {
-    const chart = $("#report-cost-chart");
-    if (chart) chart.innerHTML = chartBars(data.charts.monthly_costs);
-    const select = $("#report-brand");
-    if (select) api("/api/vehicles?page_size=100").then(vehicles => {
-      [...new Set(vehicles.vehicles.map(item => item.brand))].sort().forEach(brand => select.add(new Option(brand, brand)));
+    ${canReadVehicles ? `<section class="panel"><header class="panel-heading"><div><h2>Vehicle ledger export</h2><p>Current owner, vehicle identifiers, mileage and last service.</p></div></header><div class="panel-content report-controls"><label>Make filter<select id="report-brand"><option value="">All makes</option></select></label><label>Created from<input id="report-from" type="date"></label><label>Created to<input id="report-to" type="date"></label><button class="button button-quiet" data-action="export-csv">${icon("download")}Download CSV</button><p class="report-note">For a printable vehicle history, open a vehicle from the registry and choose “Print report”. In the print dialog, select “Save as PDF”.</p></div></section>` : ""}
+    ${hasPermission("financial.read") ? `<section class="panel report-help"><header class="panel-heading"><div><h2>Maintenance spend</h2><p>Service and repair costs grouped by month in PKR.</p></div></header><div class="panel-content" id="report-cost-chart"><div class="skeleton skeleton-block"></div></div></section>` : ""}
+    ${canReadFinancial ? `<section class="panel report-help"><header class="panel-heading"><div><h2>Business financials</h2><p>Purchase, sales, settlement, and recorded-cost margin · PKR · tax disabled.</p></div></header><div class="panel-content" id="financial-report-content"><div class="skeleton skeleton-block"></div></div></section>` : ""}`;
+  if (canReadVehicles) {
+    api("/api/vehicles?page_size=100").then(vehicles => {
+      const select = $("#report-brand");
+      if (select) [...new Set(vehicles.vehicles.map(item => item.brand))].sort().forEach(brand => select.add(new Option(brand, brand)));
     }).catch(error => toast(error.message, true));
-  }).catch(error => toast(error.message, true));
+  }
+  if (hasPermission("financial.read")) {
+    api("/api/dashboard").then(data => {
+      const chart = $("#report-cost-chart");
+      if (chart) chart.innerHTML = chartBars(data.charts.monthly_costs);
+    }).catch(error => toast(error.message, true));
+  }
+  if (canReadFinancial) api("/api/reports/financial").then(report => {
+    const target = $("#financial-report-content");
+    if (!target) return;
+    const totals = report.totals;
+    target.innerHTML = `<section class="kpi-grid commerce-kpis">
+      ${kpi("Purchases", moneyValue(totals.total_purchases), "received purchases", "file")}
+      ${kpi("Sales", moneyValue(totals.total_sales), "completed sales", "chart")}
+      ${kpi("Customer balances", moneyValue(totals.customer_balance_due), "outstanding", "users")}
+      ${kpi("Supplier balances", moneyValue(totals.supplier_balance_due), "outstanding", "users")}
+      ${kpi("Recorded gross profit", moneyValue(totals.realized_gross_profit), "known acquisition costs only", "chart")}
+    </section><div class="table-wrap"><table class="data-table"><thead><tr><th>Month</th><th>Purchases</th><th>Sales</th></tr></thead><tbody>${report.monthly.map(row => `<tr><td>${esc(dateFmt.format(new Date(`${String(row.month).slice(0, 10)}T12:00:00+05:00`)))}</td><td>${esc(moneyValue(row.purchases))}</td><td>${esc(moneyValue(row.sales))}</td></tr>`).join("") || '<tr><td colspan="3">No business transactions in the reporting period.</td></tr>'}</tbody></table></div><p class="report-note">${esc(report.gross_profit_note)} Uncosted sold vehicles: ${esc(totals.sales_without_recorded_acquisition_cost)}.</p>`;
+  }).catch(error => {
+    const target = $("#financial-report-content");
+    if (!target) return;
+    target.innerHTML = `<div class="module-gate" role="status"><div><h2>${error.status === 503 ? "Financial reporting is not enabled" : "Financial report unavailable"}</h2><p>${esc(error.message)}</p></div></div>`;
+  });
+}
+
+async function renderProfile(page) {
+  const profile = await api("/api/auth/me");
+  state.user = { ...state.user, ...profile, role: profile.role || profile.role_name };
+  page.innerHTML = `${pageHeading("Profile & settings", "Manage your account details and sign-in security.")}
+    <div class="dashboard-grid">
+      <section class="panel"><header class="panel-heading"><div><h2>Profile</h2><p>Your account identity and assigned role.</p></div></header>
+        <form id="profile-form" class="panel-content form-grid">
+          <label>Full name <span>*</span><input name="full_name" value="${esc(profile.full_name)}" required maxlength="120"></label>
+          <label>Email address<input value="${esc(profile.email)}" readonly></label>
+          <label>Assigned role<input value="${esc(profile.role_name || profile.role)}" readonly></label>
+          <div class="form-error hidden span-two" id="profile-form-error" role="alert"></div>
+          <footer class="modal-actions span-two"><button class="button button-primary" type="submit">Save profile</button></footer>
+        </form>
+      </section>
+      <section class="panel"><header class="panel-heading"><div><h2>Password & sessions</h2><p>Changing your password revokes active sessions.</p></div></header>
+        <form id="password-form" class="panel-content form-grid">
+          <label class="span-two">Current password <span>*</span><input type="password" name="current_password" required minlength="8" maxlength="128" autocomplete="current-password"></label>
+          <label class="span-two">New password <span>*</span><input type="password" name="new_password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
+          <div class="form-error hidden span-two" id="password-form-error" role="alert"></div>
+          <footer class="modal-actions span-two"><button class="button button-primary" type="submit">Change password</button></footer>
+        </form>
+      </section>
+    </div>`;
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!form.reportValidity()) return;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("#profile-form-error").classList.add("hidden");
+  try {
+    const updated = await api("/api/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify(Object.fromEntries(new FormData(form))),
+    });
+    state.user = { ...state.user, ...updated.user };
+    $("#profile-name").textContent = state.user.full_name;
+    $("#profile-avatar").textContent = initials(state.user.full_name);
+    toast("Profile saved.");
+  } catch (error) {
+    $("#profile-form-error").textContent = error.message;
+    $("#profile-form-error").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function changePassword(event) {
+  event.preventDefault();
+  const form = event.target;
+  if (!form.reportValidity()) return;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  $("#password-form-error").classList.add("hidden");
+  try {
+    const result = await api("/api/auth/password", {
+      method: "POST",
+      body: JSON.stringify(Object.fromEntries(new FormData(form))),
+    });
+    toast(result.message);
+    signOut(false);
+  } catch (error) {
+    $("#password-form-error").textContent = error.message;
+    $("#password-form-error").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function detailRows(tab) {
@@ -469,8 +1102,8 @@ function renderVehicleDetail() {
   const latestMileage = state.detail.mileage.at(-1)?.mileage;
   const overdue = state.detail.documents.some(item => item.status === "EXPIRED");
   const score = Math.max(42, 100 - (overdue ? 18 : 0) - (state.detail.inspections.some(item => item.result === "FAIL") ? 20 : 0));
-  const transfer = ["Admin", "Dealer"].includes(state.user.role) ? `<button class="button button-quiet button-small" data-action="transfer-owner">Transfer ownership</button>` : "";
-  const edit = ["Admin", "Dealer"].includes(state.user.role) ? `<button class="button button-quiet button-small" data-action="edit-vehicle" data-id="${vehicle.vehicle_id}">Edit record</button>` : "";
+  const transfer = hasPermission("owners.manage") ? `<button class="button button-quiet button-small" data-action="transfer-owner">Transfer ownership</button>` : "";
+  const edit = hasPermission("vehicles.manage") ? `<button class="button button-quiet button-small" data-action="edit-vehicle" data-id="${vehicle.vehicle_id}">Edit record</button>` : "";
   $("#page-content").innerHTML = `<button class="detail-back" data-action="back-vehicles">${icon("arrow")}Back to vehicles</button>
     <div class="detail-top"><div><div class="detail-title"><h1>${esc(vehicle.registration_no)}</h1><span class="badge badge-valid">${esc(vehicle.brand)} ${esc(vehicle.model)}</span></div><p class="detail-meta">VIN ${esc(vehicle.vin)} · Ledger record #${esc(vehicle.vehicle_id)}</p></div><span class="trust-score"><i></i>Trust score ${score}/100</span></div>
     <dl class="vehicle-facts"><div><dt>Model year</dt><dd>${esc(vehicle.model_year)}</dd></div><div><dt>Current owner</dt><dd>${esc(state.detail.ownership.find(item => item.ownership_status === "ACTIVE")?.full_name || "Unassigned")}</dd></div><div><dt>Odometer</dt><dd>${latestMileage == null ? "—" : `${esc(latestMileage)} km`}</dd></div><div><dt>Documents</dt><dd>${state.detail.documents.filter(item => item.status === "VALID").length} valid · ${state.detail.documents.filter(item => item.status === "EXPIRED").length} expired</dd></div><div><dt>Fuel / transmission</dt><dd>${esc(vehicle.fuel_type || "—")} / ${esc(vehicle.transmission || "—")}</dd></div></dl>
@@ -583,16 +1216,23 @@ async function saveRecord(event) {
   }
 }
 
-function openUserForm(userId = "", roleName = "Owner/Viewer", isActive = true) {
+function openUserForm(userId = "", roleName = "Viewer", isActive = true) {
   const form = $("#user-form");
   form.reset();
   form.dataset.userId = userId;
   $("#user-form-title").textContent = userId ? "Manage user access" : "Create user account";
   $("#user-save").textContent = userId ? "Save access" : "Create account";
   $("#user-form-error").classList.add("hidden");
+  const assignableRoles = state.user.role === "Super Admin"
+    ? ["Viewer", "Staff", "Accountant", "Manager", "Business Owner", "Admin", "Super Admin"]
+    : ["Viewer", "Staff", "Accountant", "Manager", "Business Owner", "Admin"];
+  const legacyRole = Boolean(userId && roleName && !assignableRoles.includes(roleName));
+  const roleField = legacyRole
+    ? `<p class="form-hint span-two">This account has legacy role “${esc(roleName)}”. Its role assignment is preserved pending an approved mapping. You may change account status without changing its role.</p>`
+    : `<label>Role <span>*</span><select name="role" required>${assignableRoles.map(role => `<option ${role === (roleName || "Viewer") ? "selected" : ""}>${role}</option>`).join("")}</select></label>`;
   $("#user-fields").innerHTML = userId
-    ? `<label>Role <span>*</span><select name="role" required>${["Owner/Viewer", "Inspector", "Dealer", "Admin"].map(role => `<option ${role === roleName ? "selected" : ""}>${role}</option>`).join("")}</select></label><label>Account status <span>*</span><select name="is_active" required><option value="true" ${isActive ? "selected" : ""}>Active</option><option value="false" ${!isActive ? "selected" : ""}>Inactive</option></select></label>`
-    : `<label>Full name <span>*</span><input name="full_name" required maxlength="120"></label><label>Email <span>*</span><input name="email" type="email" required></label><label>Role <span>*</span><select name="role" required><option>Owner/Viewer</option><option>Inspector</option><option>Dealer</option><option>Admin</option></select></label><label>Temporary password <span>*</span><input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>`;
+    ? `${roleField}<label>Account status <span>*</span><select name="is_active" required><option value="true" ${isActive ? "selected" : ""}>Active</option><option value="false" ${!isActive ? "selected" : ""}>Inactive</option></select></label>`
+    : `<label>Full name <span>*</span><input name="full_name" required maxlength="120"></label><label>Email <span>*</span><input name="email" type="email" required></label>${roleField}<label>Temporary password <span>*</span><input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>`;
   $("#user-dialog").showModal();
 }
 
@@ -670,6 +1310,27 @@ async function exportCsv() {
   toast("Vehicle report downloaded.");
 }
 
+async function downloadFinancialPdf(path, filename) {
+  let response = await fetch(path, { headers: tokenHeader() });
+  if (response.status === 401 && state.token) {
+    const session = await api("/api/auth/refresh", { method: "POST" }, false);
+    state.token = session.access_token;
+    state.user = session.user;
+    localStorage.setItem("autoledger-token", state.token);
+    response = await fetch(path, { headers: tokenHeader() });
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(typeof body?.detail === "string" ? body.detail : "The PDF could not be downloaded.");
+  }
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
 async function exportVehicleHistoryPdf() {
   const vehicleId = state.detail.vehicle.vehicle_id;
   const response = await fetch(`/api/reports/vehicles/${vehicleId}.pdf`, { headers: tokenHeader() });
@@ -720,6 +1381,13 @@ function bindEvents() {
     if (event.target.id === "transfer-form") saveTransfer(event);
     if (event.target.id === "user-form") saveUser(event);
     if (event.target.id === "record-form") saveRecord(event);
+    if (event.target.id === "entity-form") saveEntity(event);
+    if (event.target.id === "commerce-form") saveCommerce(event);
+    if (event.target.id === "profile-form") saveProfile(event);
+    if (event.target.id === "password-form") changePassword(event);
+  });
+  document.addEventListener("change", event => {
+    if (event.target.id === "business-selector") changeBusiness(event.target.value);
   });
   document.addEventListener("click", async event => {
     const pageLink = event.target.closest("[data-page]");
@@ -742,8 +1410,41 @@ function bindEvents() {
       else if (action === "close-transfer") $("#transfer-dialog").close();
       else if (action === "close-user") $("#user-dialog").close();
       else if (action === "close-record") $("#record-dialog").close();
+      else if (action === "close-entity") $("#entity-dialog").close();
+      else if (action === "close-commerce") $("#commerce-dialog").close();
       else if (action === "new-user") openUserForm();
       else if (action === "edit-user") openUserForm(id, nav.dataset.role, nav.dataset.active === "true");
+      else if (action === "new-entity") openEntityForm(kind);
+      else if (action === "edit-entity") {
+        openEntityForm(kind, await api(`/api/${kind}/${id}`));
+      }
+      else if (action === "partner-history") {
+        state.partnerHistory = { kind, id };
+        await renderPage();
+      }
+      else if (action === "close-partner-history") {
+        state.partnerHistory = null;
+        await renderPage();
+      }
+      else if (action === "toggle-partner") {
+        const nextActive = nav.dataset.active !== "true";
+        const label = kind === "suppliers" ? "supplier" : "customer";
+        if (window.confirm(`${nextActive ? "Reactivate" : "Deactivate"} this ${label}? Existing transactions and history will be retained.`)) {
+          await api(`/api/${kind}/${id}/active`, {
+            method: "PATCH",
+            body: JSON.stringify({ is_active: nextActive }),
+          });
+          toast(`${label[0].toUpperCase()}${label.slice(1)} ${nextActive ? "reactivated" : "deactivated"}.`);
+          await renderPage();
+        }
+      }
+      else if (action === "new-commerce") await openCommerceForm(kind);
+      else if (action === "onboard-inventory") await openCommerceForm("inventory", id);
+      else if (action === "toggle-inventory") await toggleInventoryStatus(id, nav.dataset.status);
+      else if (action === "add-transaction-item") addTransactionItem();
+      else if (action === "remove-transaction-line") {
+        if ($("#transaction-lines").querySelectorAll(".transaction-line").length > 1) nav.closest(".transaction-line").remove();
+      }
       else if (action === "new-record") openRecordForm(nav.dataset.resource, state.detail?.vehicle.vehicle_id || "");
       else if (action === "detail-add-record") openRecordForm(nav.dataset.resource, state.detail.vehicle.vehicle_id);
       else if (action === "edit-record") await openEditRecord(nav.dataset.resource, id);
@@ -762,6 +1463,7 @@ function bindEvents() {
       else if (action === "export-history-pdf") await exportVehicleHistoryPdf();
       else if (action === "print-history") printVehicleHistory();
       else if (action === "export-csv") await exportCsv();
+      else if (action === "download-financial-pdf") await downloadFinancialPdf(nav.dataset.path, nav.dataset.filename);
       else if (action === "page-prev" && state.pageNumber > 1) { state.pageNumber--; await renderPage(); }
       else if (action === "page-next") { state.pageNumber++; await renderPage(); }
       else if (action === "sort-direction") { state.vehicleFilters.direction = state.vehicleFilters.direction === "asc" ? "desc" : "asc"; await renderPage(); }
@@ -781,7 +1483,15 @@ function bindEvents() {
     if (event.target.id === "vehicle-year") state.vehicleFilters.model_year = event.target.value;
     if (event.target.id === "vehicle-status") state.vehicleFilters.status = event.target.value;
     if (event.target.id === "vehicle-sort") state.vehicleFilters.sort = event.target.value;
-    if (["vehicle-brand", "vehicle-fuel", "vehicle-year", "vehicle-status", "vehicle-sort"].includes(event.target.id)) { state.pageNumber = 1; renderPage(); }
+    if (event.target.id === "inventory-status") state.inventoryStatus = event.target.value;
+    if (event.target.id === "commerce-status-filter") state.commerceStatusFilter[event.target.dataset.kind] = event.target.value;
+    if (event.target.id === "include-inactive-partners") state.includeInactivePartners = event.target.checked;
+    if (event.target.id === "user-role-filter") state.userRoleFilter = event.target.value;
+    if (event.target.id === "user-status-filter") state.userStatusFilter = event.target.value;
+    if (["vehicle-brand", "vehicle-fuel", "vehicle-year", "vehicle-status", "vehicle-sort", "inventory-status", "commerce-status-filter", "include-inactive-partners", "user-role-filter", "user-status-filter"].includes(event.target.id)) {
+      state.pageNumber = 1;
+      renderPage();
+    }
   });
 
   document.addEventListener("input", event => {
@@ -794,6 +1504,30 @@ function bindEvents() {
       state.recordSearch = event.target.value;
       window.clearTimeout(state.searchTimer);
       state.searchTimer = window.setTimeout(() => { state.pageNumber = 1; rerenderPreservingSearch("#record-search"); }, 250);
+    }
+    if (event.target.id === "user-search") {
+      state.userSearch = event.target.value;
+      window.clearTimeout(state.searchTimer);
+      state.searchTimer = window.setTimeout(() => {
+        state.pageNumber = 1;
+        rerenderPreservingSearch("#user-search");
+      }, 250);
+    }
+    if (event.target.id === "partner-search") {
+      state.partnerSearch[event.target.dataset.kind] = event.target.value;
+      window.clearTimeout(state.searchTimer);
+      state.searchTimer = window.setTimeout(() => {
+        state.pageNumber = 1;
+        rerenderPreservingSearch("#partner-search");
+      }, 250);
+    }
+    if (event.target.id === "commerce-search") {
+      state.commerceSearch = event.target.value;
+      window.clearTimeout(state.searchTimer);
+      state.searchTimer = window.setTimeout(() => {
+        state.pageNumber = 1;
+        rerenderPreservingSearch("#commerce-search");
+      }, 250);
     }
     if (event.target.id === "global-search-input") {
       window.clearTimeout(state.searchTimer);
@@ -815,8 +1549,9 @@ async function init() {
   bindEvents();
   if (state.token) {
     try {
-      state.user = await api("/api/auth/me");
-      showApplication(location.hash.slice(1) || (state.user.role === "Owner/Viewer" ? "vehicles" : "dashboard"));
+      state.user = normalizeUser(await api("/api/auth/me"));
+      await loadBusinessMemberships();
+      showApplication(location.hash.slice(1) || (hasPermission("vehicles.read") ? "dashboard" : "profile"));
       return;
     } catch { localStorage.removeItem("autoledger-token"); state.token = null; }
   }

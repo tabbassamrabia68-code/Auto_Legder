@@ -17,9 +17,28 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from backend.database import get_connection
 from backend.schemas import validate_record
 from backend.services import delete_ledger_record, get_ledger_record, insert_ledger_record, update_ledger_record
-from backend.security import get_current_user, require_roles
+from backend.security import (
+    authorize_platform_admin,
+    authorize_permissions,
+    get_business_context,
+    get_current_user,
+    has_permission,
+    require_business_permissions,
+    require_platform_admin,
+)
 
 router = APIRouter(prefix="/api", tags=["Ledger and reports"])
+RESOURCE_READ_PERMISSIONS = {
+    "owners": "owners.read",
+    "ownership": "owners.read",
+    "services": "history.read",
+    "repairs": "history.read",
+    "mileage": "history.read",
+    "inspections": "verification.read",
+    "documents": "history.read",
+    "verification": "verification.read",
+    "audit": "audit.read",
+}
 
 RESOURCE_QUERIES = {
     "owners": {
@@ -89,13 +108,13 @@ RESOURCE_QUERIES = {
 }
 
 WRITE_RESOURCES = {
-    "owners": ("owners", "owner_id", {"full_name", "email", "phone"}, {"Admin", "Dealer"}),
-    "services": ("service_records", "service_id", {"vehicle_id", "service_date", "service_type", "mileage", "workshop_name", "notes", "cost"}, {"Admin", "Dealer", "Inspector"}),
-    "repairs": ("repair_records", "repair_id", {"vehicle_id", "repair_date", "repair_type", "description", "cost", "workshop_name"}, {"Admin", "Dealer", "Inspector"}),
-    "mileage": ("mileage_records", "mileage_id", {"vehicle_id", "recorded_date", "mileage", "source"}, {"Admin", "Dealer", "Inspector"}),
-    "inspections": ("inspections", "inspection_id", {"vehicle_id", "inspection_date", "result", "remarks"}, {"Admin", "Inspector"}),
-    "documents": ("documents", "document_id", {"vehicle_id", "document_type", "document_number", "issue_date", "expiry_date", "status"}, {"Admin", "Inspector", "Dealer"}),
-    "verification": ("verification_records", "verification_id", {"vehicle_id", "verification_date", "result", "remarks"}, {"Admin", "Inspector"}),
+    "owners": ("owners", "owner_id", {"full_name", "email", "phone"}),
+    "services": ("service_records", "service_id", {"vehicle_id", "service_date", "service_type", "mileage", "workshop_name", "notes", "cost"}),
+    "repairs": ("repair_records", "repair_id", {"vehicle_id", "repair_date", "repair_type", "description", "cost", "workshop_name"}),
+    "mileage": ("mileage_records", "mileage_id", {"vehicle_id", "recorded_date", "mileage", "source"}),
+    "inspections": ("inspections", "inspection_id", {"vehicle_id", "inspection_date", "result", "remarks"}),
+    "documents": ("documents", "document_id", {"vehicle_id", "document_type", "document_number", "issue_date", "expiry_date", "status"}),
+    "verification": ("verification_records", "verification_id", {"vehicle_id", "verification_date", "result", "remarks"}),
 }
 
 RECORD_TABLES = {
@@ -112,36 +131,57 @@ RECORD_TABLES = {
 
 
 @router.get("/dashboard", tags=["Dashboard"])
-def dashboard(user=Depends(get_current_user)):
+def dashboard(user=Depends(require_business_permissions("vehicles.read"))):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT COUNT(*) AS total FROM vehicles")
             total_vehicles = cur.fetchone()["total"]
-            cur.execute("SELECT COUNT(DISTINCT owner_id) AS total FROM ownership_records WHERE ownership_status='ACTIVE'")
-            active_owners = cur.fetchone()["total"]
-            cur.execute("SELECT COUNT(*) AS total FROM vw_expiring_documents")
-            expiring_documents = cur.fetchone()["total"]
-            cur.execute("SELECT COALESCE(total_cost, 0) AS total FROM vw_monthly_costs WHERE month=DATE_TRUNC('month', CURRENT_DATE)::DATE")
-            current_cost = cur.fetchone()
-            cur.execute(
-                """
-                WITH ordered AS (
-                    SELECT mileage, LAG(mileage) OVER (PARTITION BY vehicle_id ORDER BY recorded_date, mileage_id) AS previous
-                    FROM mileage_records
+            if has_permission(user, "owners.read"):
+                cur.execute("SELECT COUNT(DISTINCT owner_id) AS total FROM ownership_records WHERE ownership_status='ACTIVE'")
+                active_owners = cur.fetchone()["total"]
+            else:
+                active_owners = None
+            if has_permission(user, "history.read"):
+                cur.execute("SELECT COUNT(*) AS total FROM vw_expiring_documents")
+                expiring_documents = cur.fetchone()["total"]
+                cur.execute(
+                    """
+                    WITH ordered AS (
+                        SELECT mileage, LAG(mileage) OVER (PARTITION BY vehicle_id ORDER BY recorded_date, mileage_id) AS previous
+                        FROM mileage_records
+                    )
+                    SELECT COUNT(*) AS total FROM ordered WHERE previous IS NOT NULL AND mileage < previous
+                    """
                 )
-                SELECT COUNT(*) AS total FROM ordered WHERE previous IS NOT NULL AND mileage < previous
-                """
-            )
-            mileage_anomalies = cur.fetchone()["total"]
-            cur.execute("SELECT month, service_cost, repair_cost, total_cost FROM vw_monthly_costs ORDER BY month DESC LIMIT 6")
-            monthly_costs = cur.fetchall()
+                mileage_anomalies = cur.fetchone()["total"]
+            else:
+                expiring_documents = None
+                mileage_anomalies = None
+            if has_permission(user, "financial.read"):
+                cur.execute("SELECT COALESCE(total_cost, 0) AS total FROM vw_monthly_costs WHERE month=DATE_TRUNC('month', CURRENT_DATE)::DATE")
+                current_cost = cur.fetchone()
+                cur.execute("SELECT month, service_cost, repair_cost, total_cost FROM vw_monthly_costs ORDER BY month DESC LIMIT 6")
+                monthly_costs = cur.fetchall()
+            else:
+                current_cost = None
+                monthly_costs = []
             cur.execute("SELECT brand AS label, COUNT(*) AS value FROM vehicles GROUP BY brand ORDER BY value DESC, brand LIMIT 8")
             vehicles_by_brand = cur.fetchall()
             cur.execute("SELECT COALESCE(fuel_type, 'Not recorded') AS label, COUNT(*) AS value FROM vehicles GROUP BY fuel_type ORDER BY value DESC")
             fuel_split = cur.fetchall()
-            if user["role_name"] == "Admin":
-                cur.execute("SELECT audit_id, action, entity_name, entity_id, action_timestamp, details FROM audit_logs ORDER BY action_timestamp DESC LIMIT 8")
+            if has_permission(user, "audit.read"):
+                cur.execute(
+                    """
+                    SELECT audit_id, action, entity_name, entity_id, action_timestamp, details
+                    FROM audit_logs
+                    WHERE business_id = %s
+                       OR (business_id IS NULL AND %s)
+                    ORDER BY action_timestamp DESC
+                    LIMIT 8
+                    """,
+                    (user["business_id"], user["role_name"] == "Super Admin"),
+                )
                 activity = cur.fetchall()
             else:
                 activity = []
@@ -150,7 +190,7 @@ def dashboard(user=Depends(get_current_user)):
                 "total_vehicles": total_vehicles,
                 "active_owners": active_owners,
                 "expiring_documents": expiring_documents,
-                "maintenance_cost_month": current_cost["total"] if current_cost else 0,
+                "maintenance_cost_month": current_cost["total"] if current_cost else None,
                 "mileage_anomalies": mileage_anomalies,
             },
             "charts": {
@@ -165,26 +205,43 @@ def dashboard(user=Depends(get_current_user)):
 
 
 @router.get("/search", tags=["Search"])
-def global_search(q: str = Query(min_length=1, max_length=100), user=Depends(get_current_user)):
+def global_search(q: str = Query(min_length=1, max_length=100), user=Depends(get_business_context)):
+    if not (has_permission(user, "vehicles.read") or has_permission(user, "owners.read")):
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have permission to search business records.",
+        )
     term = f"%{q.strip()}%"
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                  SELECT 'vehicle' AS kind, vehicle_id AS id, registration_no AS title,
-                       brand || ' ' || model AS subtitle
-                FROM vehicles
-                WHERE vin ILIKE %s OR registration_no ILIKE %s OR brand ILIKE %s OR model ILIKE %s
-                  UNION ALL
-                  SELECT 'owner', MIN(owner_id), full_name, COALESCE(email, phone, '')
-                  FROM owners WHERE full_name ILIKE %s OR email ILIKE %s
-                  GROUP BY full_name, email, phone
-                LIMIT 20
-                """,
-                (term, term, term, term, term, term),
-            )
-            return {"results": cur.fetchall()}
+            results = []
+            if has_permission(user, "vehicles.read"):
+                cur.execute(
+                    """
+                    SELECT 'vehicle' AS kind, vehicle_id AS id, registration_no AS title,
+                           brand || ' ' || model AS subtitle
+                    FROM vehicles
+                    WHERE vin ILIKE %s OR registration_no ILIKE %s OR brand ILIKE %s OR model ILIKE %s
+                    LIMIT 20
+                    """,
+                    (term, term, term, term),
+                )
+                results.extend(cur.fetchall())
+            if has_permission(user, "owners.read"):
+                cur.execute(
+                    """
+                    SELECT 'owner' AS kind, MIN(owner_id) AS id, full_name AS title,
+                           COALESCE(email, phone, '') AS subtitle
+                    FROM owners
+                    WHERE full_name ILIKE %s OR email ILIKE %s
+                    GROUP BY full_name, email, phone
+                    LIMIT 20
+                    """,
+                    (term, term),
+                )
+                results.extend(cur.fetchall())
+            return {"results": results[:20]}
     finally:
         conn.close()
 
@@ -197,19 +254,31 @@ def list_records(
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str | None = None,
     direction: str = Query(default="desc", pattern="^(asc|desc)$"),
-    user=Depends(get_current_user),
+    user=Depends(get_business_context),
 ):
     spec = RESOURCE_QUERIES.get(resource)
     if spec is None:
         raise HTTPException(status_code=404, detail="Unknown ledger section.")
-    if resource == "audit" and user["role_name"] != "Admin":
-        raise HTTPException(status_code=403, detail="Audit records are restricted to administrators.")
+    permission = RESOURCE_READ_PERMISSIONS.get(resource)
+    if permission is None:
+        raise HTTPException(status_code=404, detail="Unknown ledger section.")
+    authorize_permissions(user, permission)
 
-    where_sql = ""
+    where_conditions: list[str] = []
     params: list[object] = []
+    if resource == "audit":
+        where_conditions.append(
+            "(al.business_id = %s OR (al.business_id IS NULL AND %s))"
+        )
+        params.extend(
+            [user["business_id"], user["role_name"] == "Super Admin"]
+        )
     if q.strip():
-        where_sql = " WHERE " + " OR ".join(f"{column} ILIKE %s" for column in spec["search"])
+        where_conditions.append(
+            "(" + " OR ".join(f"{column} ILIKE %s" for column in spec["search"]) + ")"
+        )
         params.extend([f"%{q.strip()}%"] * len(spec["search"]))
+    where_sql = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
     group_sql = spec.get("group", "")
     sort_sql = spec["sort"].get(sort, spec["order"]) if sort else spec["order"]
     if sort:
@@ -235,16 +304,37 @@ def list_records(
 
 
 @router.get("/records/{resource}/{record_id}", tags=["Ledger records"])
-def get_record(resource: str, record_id: int, user=Depends(get_current_user)):
+def get_record(resource: str, record_id: int, user=Depends(get_business_context)):
     table_spec = RECORD_TABLES.get(resource)
     if table_spec is None:
         raise HTTPException(status_code=404, detail="Unknown ledger section.")
-    if resource == "audit" and user["role_name"] != "Admin":
-        raise HTTPException(status_code=403, detail="Audit records are restricted to administrators.")
+    permission = RESOURCE_READ_PERMISSIONS.get(resource)
+    if permission is None:
+        raise HTTPException(status_code=404, detail="Unknown ledger section.")
+    authorize_permissions(user, permission)
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            record = get_ledger_record(conn, *table_spec, record_id)
+            if resource == "audit":
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audit_logs
+                    WHERE audit_id = %s
+                      AND (
+                          business_id = %s
+                          OR (business_id IS NULL AND %s)
+                      )
+                    """,
+                    (
+                        record_id,
+                        user["business_id"],
+                        user["role_name"] == "Super Admin",
+                    ),
+                )
+                record = cur.fetchone()
+            else:
+                record = get_ledger_record(conn, *table_spec, record_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Ledger record not found.")
         return {"record": record}
@@ -257,9 +347,8 @@ def create_record(resource: str, payload: dict, user=Depends(get_current_user)):
     spec = WRITE_RESOURCES.get(resource)
     if spec is None:
         raise HTTPException(status_code=404, detail="This ledger section does not accept direct inserts.")
-    table_name, id_column, allowed_fields, allowed_roles = spec
-    if user["role_name"] not in allowed_roles:
-        raise HTTPException(status_code=403, detail="Your role cannot create records in this ledger section.")
+    table_name, id_column, allowed_fields = spec
+    authorize_platform_admin(user)
 
     try:
         values = validate_record(resource, payload)
@@ -294,9 +383,7 @@ def patch_record(resource: str, record_id: int, payload: dict, user=Depends(get_
     if spec is None or table_spec is None:
         raise HTTPException(status_code=404, detail="This ledger section cannot be updated directly.")
     table_name, id_column = table_spec
-    _, _, _, allowed_roles = spec
-    if user["role_name"] not in allowed_roles:
-        raise HTTPException(status_code=403, detail="Your role cannot update records in this ledger section.")
+    authorize_platform_admin(user)
     try:
         values = validate_record(resource, payload, partial=True)
     except ValueError as exc:
@@ -322,7 +409,7 @@ def patch_record(resource: str, record_id: int, payload: dict, user=Depends(get_
 
 
 @router.delete("/records/{resource}/{record_id}", status_code=204, tags=["Ledger records"])
-def delete_record(resource: str, record_id: int, user=Depends(require_roles("Admin"))):
+def delete_record(resource: str, record_id: int, user=Depends(require_platform_admin())):
     spec = WRITE_RESOURCES.get(resource)
     table_spec = RECORD_TABLES.get(resource)
     if spec is None or table_spec is None:
@@ -346,7 +433,7 @@ def export_vehicles_csv(
     brand: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
-    user=Depends(get_current_user),
+    user=Depends(require_business_permissions("vehicles.read")),
 ):
     filters = []
     params = []
@@ -386,7 +473,10 @@ def export_vehicles_csv(
 
 
 @router.get("/reports/vehicles/{vehicle_id}.pdf", tags=["Reports"])
-def export_vehicle_history_pdf(vehicle_id: int, user=Depends(get_current_user)):
+def export_vehicle_history_pdf(
+    vehicle_id: int,
+    user=Depends(require_business_permissions("history.read")),
+):
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
