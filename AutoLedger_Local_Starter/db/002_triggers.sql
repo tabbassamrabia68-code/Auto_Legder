@@ -37,7 +37,10 @@ AS $$
 DECLARE
     row_data JSONB;
     record_id INTEGER;
+    actor_id INTEGER;
 BEGIN
+    actor_id := NULLIF(current_setting('app.user_id', TRUE), '')::INTEGER;
+
     IF TG_OP = 'DELETE' THEN
         row_data := to_jsonb(OLD);
     ELSE
@@ -52,7 +55,7 @@ BEGIN
 
     INSERT INTO audit_logs (user_id, action, entity_name, entity_id, details)
     VALUES (
-        NULL,
+        actor_id,
         TG_OP,
         TG_TABLE_NAME,
         record_id,

@@ -1,7 +1,10 @@
 .env
 .venv/
+node_modules/
 __pycache__/
 *.py[cod]
+*.dump
+*.backup
 .pytest_cache/
 .coverage
 htmlcov/

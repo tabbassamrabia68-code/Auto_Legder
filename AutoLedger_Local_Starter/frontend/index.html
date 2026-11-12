@@ -3,48 +3,126 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AutoLedger | Vehicle History & Verification</title>
+  <meta name="theme-color" content="#19392f">
+  <title>AutoLedger | Fleet ledger</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand-mark">AL</div>
-    <div>
-      <h1>AutoLedger</h1>
-      <p>Vehicle History &amp; Verification System</p>
-    </div>
-    <span id="api-status" class="status">Connecting…</span>
-  </header>
+  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-car" viewBox="0 0 24 24"><path d="m5 11 1.5-5h11L19 11l2 2v5h-2v2h-3v-2H8v2H5v-2H3v-5l2-2Z"/><path d="M6.5 11h11M6 15h.01M18 15h.01"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 11 12 14 22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18M8 15l4-4 4 3 5-7"/><path d="M17 7h4v4"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-7-7 7 7-7 7"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m18 6-12 12M6 6l12 12"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+    <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a5 5 0 0 0-6.4 6.4L3 18l3 3 5.3-5.3a5 5 0 0 0 6.4-6.4L14 13l-3-3 3.7-3.7Z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></symbol>
+  </svg>
 
-  <main>
-    <section class="hero">
-      <p class="eyebrow">LOCAL DEVELOPMENT MVP</p>
-      <h2>Know the history behind every vehicle.</h2>
-      <p>Search the AutoLedger PostgreSQL database by registration number, VIN, brand, or model.</p>
-      <form id="search-form">
-        <input id="search-input" placeholder="Try KHI-401 or Toyota" aria-label="Search vehicles">
-        <button type="submit">Search vehicles</button>
-        <button type="button" id="show-all" class="secondary">Show all</button>
-      </form>
-      <p id="message" role="status"></p>
-    </section>
-
-    <section class="results-section">
-      <div class="section-heading">
-        <div><p class="eyebrow">DATABASE RESULTS</p><h2>Vehicles</h2></div>
-        <span id="result-count">Loading…</span>
+  <main id="auth-screen" class="auth-screen" aria-live="polite">
+    <section class="auth-brand">
+      <a class="brand-lockup" href="/" aria-label="AutoLedger home"><span class="brand-mark">A<span></span></span><span>AutoLedger</span></a>
+      <div class="auth-story">
+        <p class="eyebrow">VEHICLE LIFECYCLE LEDGER</p>
+        <h1>Every mile.<br>Every handoff.<br><em>On the record.</em></h1>
+        <p>A trusted, traceable view of the details that shape a vehicle's story.</p>
       </div>
-      <div id="vehicle-grid" class="vehicle-grid"></div>
+      <span class="auth-footnote">LOCAL INSTANCE <i></i> DATABASE LINK READY</span>
     </section>
-
-    <section id="history-section" class="history-section hidden">
-      <div class="section-heading"><div><p class="eyebrow">RECORD DETAILS</p><h2 id="history-title">Vehicle history</h2></div>
-        <button id="close-history" class="secondary">Close</button>
+    <section class="auth-panel">
+      <div id="auth-form-mount" class="auth-form-mount">
+        <div class="auth-loading"><span class="spinner"></span><span>Connecting to ledger</span></div>
       </div>
-      <div id="history-content"></div>
     </section>
   </main>
-  <footer>AutoLedger • DBMS local MVP • Sample data only</footer>
-  <script src="/static/app.js"></script>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand"><a class="brand-lockup" href="#dashboard"><span class="brand-mark">A<span></span></span><span>AutoLedger</span></a><button class="icon-button mobile-close" data-action="close-menu" aria-label="Close menu"><svg><use href="#i-close"></use></svg></button></div>
+      <div class="workspace-label"><span class="workspace-dot"></span><span>LOCAL WORKSPACE</span><span class="workspace-caret">⌄</span></div>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <p class="nav-caption">WORKSPACE</p>
+        <a href="#dashboard" class="nav-link active" data-page="dashboard"><svg><use href="#i-grid"></use></svg><span>Overview</span><kbd>1</kbd></a>
+        <a href="#vehicles" class="nav-link" data-page="vehicles"><svg><use href="#i-car"></use></svg><span>Vehicles</span><kbd>2</kbd></a>
+        <a href="#owners" class="nav-link" data-page="owners"><svg><use href="#i-users"></use></svg><span>Owners</span></a>
+        <a href="#documents" class="nav-link" data-page="documents"><svg><use href="#i-file"></use></svg><span>Documents</span><b class="nav-alert" id="expiry-nav-count"></b></a>
+        <a href="#inspections" class="nav-link" data-page="inspections"><svg><use href="#i-check"></use></svg><span>Inspections</span></a>
+        <a href="#verification" class="nav-link" data-page="verification"><svg><use href="#i-shield"></use></svg><span>Verification</span></a>
+        <p class="nav-caption nav-caption-spaced">INSIGHT</p>
+        <a href="#reports" class="nav-link" data-page="reports"><svg><use href="#i-chart"></use></svg><span>Reports</span></a>
+        <a href="#audit" class="nav-link admin-only hidden" data-page="audit"><svg><use href="#i-activity"></use></svg><span>Audit trail</span></a>
+        <a href="#users" class="nav-link admin-only hidden" data-page="users"><svg><use href="#i-users"></use></svg><span>Team access</span></a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="system-state"><span class="pulse-dot"></span><span><b>Database online</b><small>PostgreSQL · Local</small></span></div>
+        <div class="profile-row"><span class="avatar" id="profile-avatar">AL</span><span class="profile-copy"><b id="profile-name">Local user</b><small id="profile-role">Viewer</small></span><button class="icon-button profile-logout" data-action="logout" aria-label="Sign out" title="Sign out"><svg><use href="#i-logout"></use></svg></button></div>
+      </div>
+    </aside>
+    <div id="sidebar-scrim" class="sidebar-scrim hidden" data-action="close-menu"></div>
+    <section class="workspace-main">
+      <header class="app-header">
+        <button class="icon-button menu-toggle" data-action="open-menu" aria-label="Open navigation"><svg><use href="#i-menu"></use></svg></button>
+        <div class="breadcrumbs"><span>AutoLedger</span><svg><use href="#i-arrow"></use></svg><b id="breadcrumb-current">Overview</b></div>
+        <div class="header-actions">
+          <label class="global-search"><svg><use href="#i-search"></use></svg><input id="global-search-input" type="search" placeholder="Search VIN, registration, owner..." autocomplete="off"><kbd>Ctrl K</kbd><div id="global-search-results" class="search-results hidden"></div></label>
+          <button class="icon-button theme-toggle" data-action="theme" aria-label="Toggle color theme" title="Toggle theme"><svg id="theme-icon"><use href="#i-moon"></use></svg></button>
+          <span class="header-divider"></span>
+          <span class="header-date" id="header-date"></span>
+        </div>
+      </header>
+      <main id="page-content" class="page-content" tabindex="-1"></main>
+      <footer class="app-footer"><span>AutoLedger Ledger Suite <b>·</b> Local demo environment</span><span>All times shown in Pakistan Standard Time</span></footer>
+    </section>
+  </div>
+
+  <dialog id="vehicle-dialog" class="modal-dialog"><form id="vehicle-form" class="modal-card">
+    <header class="modal-header"><div><p class="eyebrow">FLEET REGISTER</p><h2 id="vehicle-form-title">Add vehicle</h2></div><button type="button" class="icon-button" data-action="close-dialog" aria-label="Close"><svg><use href="#i-close"></use></svg></button></header>
+    <input id="vehicle-id" type="hidden">
+    <div class="form-grid">
+      <label>VIN <span>*</span><input name="vin" required maxlength="17" minlength="1" autocomplete="off"></label>
+      <label>Registration number <span>*</span><input name="registration_no" required maxlength="30"></label>
+      <label>Make <span>*</span><input name="brand" required maxlength="50"></label>
+      <label>Model <span>*</span><input name="model" required maxlength="50"></label>
+      <label>Model year <span>*</span><input name="model_year" type="number" min="1980" max="2035" required></label>
+      <label>Engine number<input name="engine_no" maxlength="50"></label>
+      <label>Fuel type<select name="fuel_type"><option value="">Not recorded</option><option>Petrol</option><option>Diesel</option><option>Hybrid</option><option>Electric</option><option>CNG</option><option>LPG</option></select></label>
+      <label>Transmission<select name="transmission"><option value="">Not recorded</option><option>Automatic</option><option>Manual</option><option>CVT</option></select></label>
+      <label class="span-two">Color<input name="color" maxlength="30"></label>
+    </div>
+    <div class="form-error hidden" id="vehicle-form-error" role="alert"></div>
+    <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-dialog">Cancel</button><button type="submit" class="button button-primary" id="vehicle-save"><svg><use href="#i-check"></use></svg><span>Save vehicle</span></button></footer>
+  </form></dialog>
+  <dialog id="record-dialog" class="modal-dialog"><form id="record-form" class="modal-card">
+    <header class="modal-header"><div><p class="eyebrow" id="record-form-eyebrow">LEDGER ENTRY</p><h2 id="record-form-title">Add record</h2></div><button type="button" class="icon-button" data-action="close-record" aria-label="Close"><svg><use href="#i-close"></use></svg></button></header>
+    <div id="record-fields" class="form-grid"></div>
+    <div class="form-error hidden" id="record-form-error" role="alert"></div>
+    <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-record">Cancel</button><button type="submit" class="button button-primary" id="record-save">Save record</button></footer>
+  </form></dialog>
+  <dialog id="transfer-dialog" class="modal-dialog"><form id="transfer-form" class="modal-card">
+    <header class="modal-header"><div><p class="eyebrow">OWNERSHIP LEDGER</p><h2>Transfer ownership</h2></div><button type="button" class="icon-button" data-action="close-transfer" aria-label="Close"><svg><use href="#i-close"></use></svg></button></header>
+    <p class="modal-copy">The current active record will close and the new owner record will open in one database transaction.</p>
+    <div class="form-grid"><label>New owner ID <span>*</span><input name="new_owner_id" type="number" min="1" required></label><label>Transfer date <span>*</span><input name="transfer_date" type="date" required></label></div>
+    <div class="form-error hidden" id="transfer-form-error" role="alert"></div>
+    <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-transfer">Cancel</button><button type="submit" class="button button-primary" id="transfer-save">Confirm transfer</button></footer>
+  </form></dialog>
+  <dialog id="user-dialog" class="modal-dialog"><form id="user-form" class="modal-card">
+    <header class="modal-header"><div><p class="eyebrow">TEAM ACCESS</p><h2 id="user-form-title">Create user account</h2></div><button type="button" class="icon-button" data-action="close-user" aria-label="Close"><svg><use href="#i-close"></use></svg></button></header>
+    <div id="user-fields" class="form-grid"><label>Full name <span>*</span><input name="full_name" required maxlength="120"></label><label>Email <span>*</span><input name="email" type="email" required></label><label>Role <span>*</span><select name="role" required><option>Owner/Viewer</option><option>Inspector</option><option>Dealer</option><option>Admin</option></select></label><label>Temporary password <span>*</span><input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password"></label></div>
+    <div class="form-error hidden" id="user-form-error" role="alert"></div>
+    <footer class="modal-actions"><button type="button" class="button button-quiet" data-action="close-user">Cancel</button><button type="submit" class="button button-primary" id="user-save">Create account</button></footer>
+  </form></dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/static/app.js?v=20261012-1" defer></script>
 </body>
 </html>

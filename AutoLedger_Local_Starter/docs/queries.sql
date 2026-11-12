@@ -75,6 +75,33 @@ JOIN (
 GROUP BY v.brand, DATE_TRUNC('month', costs.event_date)
 ORDER BY month DESC, v.brand;
 
+-- 11. Latest verification event for each vehicle (LEFT JOIN LATERAL).
+SELECT v.vehicle_id, v.registration_no, latest.verification_date,
+       latest.result, u.full_name AS verified_by
+FROM vehicles v
+LEFT JOIN LATERAL (
+    SELECT verification_date, result, verified_by
+    FROM verification_records vr
+    WHERE vr.vehicle_id = v.vehicle_id
+    ORDER BY verification_date DESC, verification_id DESC
+    LIMIT 1
+) latest ON TRUE
+LEFT JOIN users u ON u.user_id = latest.verified_by
+ORDER BY v.registration_no
+LIMIT 25;
+
+-- 12. Document status by vehicle, including dates that have since expired.
+SELECT v.vehicle_id, v.registration_no, d.document_type, d.issue_date,
+       d.expiry_date,
+       CASE
+           WHEN d.status <> 'CANCELLED' AND d.expiry_date < CURRENT_DATE THEN 'EXPIRED'
+           ELSE d.status
+       END AS effective_status
+FROM documents d
+JOIN vehicles v USING (vehicle_id)
+ORDER BY d.expiry_date NULLS LAST, v.registration_no
+LIMIT 25;
+
 -- Fraud-detection demo: try a mileage reading below a vehicle's latest reading.
 -- The trigger should reject this statement with SQLSTATE 23514; run manually
 -- with a valid vehicle_id, and do not disable the trigger to retain test data.

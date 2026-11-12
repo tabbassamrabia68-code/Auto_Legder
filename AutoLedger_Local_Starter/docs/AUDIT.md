@@ -1,5 +1,8 @@
 # AutoLedger Audit Summary
 
+> This is the initial Phase 0 snapshot. Its test and server observations are
+> historical; see [PROGRESS_REPORT.md](PROGRESS_REPORT.md) for current status.
+
 ## Frontend Pages
 
 The frontend is a single-page application served at `/`; views are selected with
